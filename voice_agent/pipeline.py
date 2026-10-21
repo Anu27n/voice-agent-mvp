@@ -46,6 +46,7 @@ SILENCE_GOODBYE = "I haven't heard anything for a while, so I'll end the call he
 MAX_DURATION_GOODBYE = "We've reached the time limit for this call. Thanks for chatting, goodbye!"
 PLAYOUT_MARGIN_S = 0.25  # client-side jitter buffer and scheduling slack
 GOODBYE_TIMEOUT_S = 15.0
+MAX_TYPED_CHARS = 2000
 WATCHDOG_INTERVAL_S = 0.2
 
 
@@ -198,9 +199,11 @@ class VoicePipeline:
         store: Store,
         transport: Transport,
         clock: Callable[[], float] = time.perf_counter,
+        on_ended: Callable[[], None] | None = None,
     ) -> None:
         self.session = session
         self.settings = settings
+        self._on_ended = on_ended
         self._stt = stt
         self._agent = agent
         self._tts = tts
@@ -276,7 +279,6 @@ class VoicePipeline:
                 log.warning("[%s] goodbye timed out", self.session.id[:8])
             await self._persist_reply(reply, goodbye, interrupted=False)
 
-        self._outbox.event("call_ended", reason=reason)
         if self.state is not CallState.ENDED:
             self.session.machine.transition(CallState.ENDED)
         current = asyncio.current_task()
@@ -286,6 +288,11 @@ class VoicePipeline:
         await asyncio.gather(*pending, return_exceptions=True)
         await asyncio.gather(*self._writes, return_exceptions=True)
         await self._store.end_session(self.session.id, reason)
+        if self._on_ended is not None:
+            self._on_ended()
+        # Only now tell the client: everything about the call is saved, and it no
+        # longer counts as active, by the time call_ended arrives.
+        self._outbox.event("call_ended", reason=reason)
         await self._outbox.close()
         self.ended.set()
 
@@ -331,12 +338,31 @@ class VoicePipeline:
             played_ms = float(played) if isinstance(played, (int, float)) and not isinstance(played, bool) else None
             turn_id = message.get("turn_id")
             await self.interrupt(turn_id if isinstance(turn_id, int) else None, played_ms)
+        elif kind == "user_text":
+            await self.user_text(message.get("text"))
         elif kind == "end_call":
             await self.end("user_ended")
         elif kind == "ping":
             self._outbox.event("pong")
         else:
             self._outbox.event("error", code="unknown_event", message=f"Unknown event type {kind!r}.")
+
+    async def user_text(self, text: Any) -> None:
+        """A typed message: handled like a spoken turn, minus VAD and STT."""
+        if self._ending:
+            return
+        if not isinstance(text, str) or not text.strip():
+            self._outbox.event("error", code="bad_message", message="user_text needs non-empty 'text'.")
+            return
+        reply = self._reply
+        if reply is not None and not reply.done:
+            await self._cancel_reply(reply, None)  # typing over the agent works like a barge-in
+            self._set_state(CallState.LISTENING, announce=True)
+        if self.state is not CallState.LISTENING:
+            return
+        now = self._clock()
+        self._last_activity = now
+        self._commit_user_turn(text.strip()[:MAX_TYPED_CHARS], TurnTimer(stt_final=now), source="text")
 
     async def interrupt(self, turn_id: int | None = None, played_ms: float | None = None) -> None:
         """Barge-in reported by the client: stop the reply, keep what was heard."""
@@ -425,13 +451,16 @@ class VoicePipeline:
             if self.state is not CallState.LISTENING or self._reply is not None or self._ending:
                 log.info("[%s] transcript dropped while %s: %r", self.session.id[:8], self.state.value, text)
                 return
-            turn_id = self.session.next_turn_id()
-            self._outbox.event("transcript_final", text=text, turn_id=turn_id)
-            self.session.conversation.add_user(text)
-            self._start_reply(turn_id, utterance.timer)
-            self._persist(self._store.add_turn(self.session.id, turn_id, "user", text))
+            self._commit_user_turn(text, utterance.timer, source="voice")
         finally:
             self._finalizing -= 1
+
+    def _commit_user_turn(self, text: str, timer: TurnTimer, *, source: str) -> None:
+        turn_id = self.session.next_turn_id()
+        self._outbox.event("transcript_final", text=text, turn_id=turn_id, source=source)
+        self.session.conversation.add_user(text)
+        self._start_reply(turn_id, timer)
+        self._persist(self._store.add_turn(self.session.id, turn_id, "user", text))
 
     # ------------------------------------------------------------- replies
 
@@ -459,9 +488,13 @@ class VoicePipeline:
             reply.run.commit_completed()
         if self._reply is reply:
             self._reply = None
-        if self.state in (CallState.THINKING, CallState.SPEAKING) and not self._ending:
+        hang_up = self.session.hangup_requested and not self._ending
+        if self.state in (CallState.THINKING, CallState.SPEAKING) and not self._ending and not hang_up:
             self._set_state(CallState.LISTENING)
         await self._persist_reply(reply, reply.timeline.full_text(), interrupted=False)
+        if hang_up:
+            # The agent said goodbye and asked to hang up; its goodbye has now played.
+            self._spawn(self.end("agent_ended"))
 
     async def _speak_agent(self, reply: Reply) -> None:
         run = self._agent.start(self.session.conversation)
@@ -570,6 +603,7 @@ class VoicePipeline:
             reply.task.cancel()
             await asyncio.gather(reply.task, return_exceptions=True)
         reply.done = True
+        self.session.hangup_requested = False  # interrupted the goodbye: the caller has more to say
         self._outbox.drop_audio(reply.turn_id)
         heard_ms = self._heard_ms(reply, played_ms)
         self._commit_heard(reply, heard_ms)

@@ -109,7 +109,7 @@ class Harness:
         self.store = Store(":memory:")
         self.session = Session(id="test-session", started_at=utcnow(), created_monotonic=0.0)
         self.transport = FakeTransport()
-        tools = ToolExecutor(default_tools(), timeout_s=settings.tool_timeout_s)
+        tools = ToolExecutor(default_tools(on_end_call=self._hang_up), timeout_s=settings.tool_timeout_s)
         self.agent = Agent(self.llm, tools, settings.system_prompt, timeout_s=settings.llm_timeout_s)
         self.pipeline = VoicePipeline(
             self.session,
@@ -120,6 +120,9 @@ class Harness:
             store=self.store,
             transport=self.transport,
         )
+
+    def _hang_up(self) -> None:
+        self.session.hangup_requested = True
 
     async def start(self) -> "Harness":
         await self.store.create_session(self.session.id, self.session.started_at, self.settings.public_config())
