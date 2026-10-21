@@ -439,6 +439,9 @@ class VoicePipeline:
         self._reply = reply
         self._set_state(CallState.THINKING)
         reply.task = asyncio.create_task(self._run_reply(reply, fixed_text))
+        # A finished reply may still be saving its turn; the call's end waits for it.
+        self._writes.add(reply.task)
+        reply.task.add_done_callback(self._writes.discard)
 
     async def _run_reply(self, reply: Reply, fixed_text: str | None) -> None:
         try:
@@ -601,12 +604,13 @@ class VoicePipeline:
     async def _persist_reply(self, reply: Reply, text: str, *, interrupted: bool) -> None:
         tool_calls = reply.run.tool_log if reply.run is not None else []
         metrics = reply.timer.as_metrics()
-        self._outbox.event("metrics", turn_id=reply.turn_id, **metrics)
         log.info("[%s] turn %d metrics %s", self.session.id[:8], reply.turn_id, metrics)
         await self._store.add_turn(
             self.session.id, reply.turn_id, "agent", text, interrupted=interrupted, tool_calls=tool_calls
         )
         await self._store.add_metrics(self.session.id, reply.turn_id, metrics)
+        # Announced only once saved, so a client that reads the session back sees it.
+        self._outbox.event("metrics", turn_id=reply.turn_id, **metrics)
 
     async def _report_error(self, turn_id: int | None, exc: ProviderError) -> None:
         log.warning("[%s] %s error %s: %s", self.session.id[:8], exc.stage, exc.code, exc.message)
