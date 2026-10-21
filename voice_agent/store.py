@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import statistics
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,3 +168,44 @@ class Store:
             "ORDER BY created_at DESC LIMIT ?",
             params,
         )
+
+    async def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_sessions, limit)
+
+    def _list_sessions(self, limit: int) -> list[dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT s.id, s.started_at, s.ended_at, s.end_reason, s.config,
+                   (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id AND t.role = 'user') AS user_turns,
+                   (SELECT COUNT(*) FROM errors e WHERE e.session_id = s.id) AS errors,
+                   (SELECT text FROM turns t WHERE t.session_id = s.id AND t.role = 'user'
+                     ORDER BY t.turn_id LIMIT 1) AS first_words
+            FROM sessions s ORDER BY s.started_at DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        for row in rows:
+            row["providers"] = json.loads(row.pop("config")).get("providers")
+            totals = [
+                r["total_ms"]
+                for r in self._query(
+                    "SELECT total_ms FROM metrics WHERE session_id = ? AND total_ms IS NOT NULL", (row["id"],)
+                )
+            ]
+            row["median_total_ms"] = round(statistics.median(totals), 1) if totals else None
+        return rows
+
+    def counts(self) -> dict[str, dict[str, int]]:
+        """Totals for the metrics endpoint."""
+
+        def grouped(sql: str) -> dict[str, int]:
+            return {str(row["key"]): row["n"] for row in self._query(sql)}
+
+        return {
+            "calls": grouped(
+                "SELECT COALESCE(end_reason, 'in_progress') AS key, COUNT(*) AS n FROM sessions GROUP BY 1"
+            ),
+            "turns": grouped("SELECT role AS key, COUNT(*) AS n FROM turns GROUP BY 1"),
+            "interrupted": grouped("SELECT 'agent' AS key, COUNT(*) AS n FROM turns WHERE interrupted = 1"),
+            "errors": grouped("SELECT stage AS key, COUNT(*) AS n FROM errors GROUP BY 1"),
+        }
