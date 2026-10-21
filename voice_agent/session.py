@@ -21,6 +21,7 @@ class Session:
     started_at: str
     created_monotonic: float
     timezone: str | None = None  # the caller's IANA time zone, if the client sent one
+    hangup_requested: bool = False  # set by the end_call tool; the call ends after the reply plays
     conversation: Conversation = field(default_factory=Conversation)
     machine: StateMachine = field(default_factory=StateMachine)
     connected: bool = False

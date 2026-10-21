@@ -4,8 +4,9 @@
   one per finished utterance, with word-by-word partials as audio arrives.
   Special entries: ``!error`` fails, ``!timeout`` hangs, ``!empty`` returns "".
 - MockLLM is a small rule-based agent that exercises the same paths as a real
-  model: streamed text, tool calls (time and order questions), tool results,
-  and memory of earlier turns. A user turn containing ``!llm_error`` fails.
+  model: streamed text, tool calls (time, orders, arithmetic, weather, hanging
+  up on "goodbye"), tool results, and memory of earlier turns. A user turn
+  containing ``!llm_error`` fails.
 - MockTTS renders a soft hum whose length follows the text length.
 """
 
@@ -44,6 +45,8 @@ DEFAULT_STT_SCRIPT = (
     "Can you check the status of order A1001?",
     "What about order B2002?",
     "Do you remember my name?",
+    "What is 18 percent of 240?",
+    "What's the weather like in Paris?",
     "Thanks, that's all for today.",
 )
 _SPECIAL = {"!error", "!timeout", "!empty"}
@@ -138,7 +141,17 @@ class MockLLM(LLMProvider):
         lower = text.lower()
         if "!llm_error" in lower:
             raise LLMError("llm_failed", "mock LLM failure")
-        if "time" in lower and "get_current_time" in tools:
+        if re.search(r"\b(bye|goodbye|that's all|hang up)\b", lower) and "end_call" in tools:
+            return "You're welcome. Goodbye!", [_call("end_call", {})]
+        expression = _arithmetic(lower)
+        if expression and "calculate" in tools:
+            return "Let me work that out.", [_call("calculate", {"expression": expression})]
+        if re.search(r"\b(weather|temperature|raining)\b", lower) and "get_weather" in tools:
+            place = re.search(r"\bin ([a-z][a-z .'-]*?)(?: today| right now| now)?[?.!]*$", lower)
+            if place:
+                return "Let me check the weather.", [_call("get_weather", {"location": place.group(1).title()})]
+            return "Sure, which city?", []
+        if re.search(r"\btime\b", lower) and "get_current_time" in tools:
             return "Let me check the time.", [_call("get_current_time", {})]
         if "order" in lower and "get_order_status" in tools:
             match = re.search(r"\b([a-z])[\s-]?(\d{3,})\b", lower)
@@ -160,9 +173,42 @@ def _call(name: str, arguments: dict) -> ToolCall:
     return ToolCall(f"mock_{uuid.uuid4().hex[:8]}", name, arguments)
 
 
+_SPOKEN_OPERATORS = (
+    ("percent", "%"),
+    ("plus", "+"),
+    ("minus", "-"),
+    ("multiplied by", "*"),
+    ("times", "*"),
+    ("divided by", "/"),
+    ("over", "/"),
+)
+
+
+def _arithmetic(lower: str) -> str | None:
+    """Pull an arithmetic expression out of a spoken question, if there is one."""
+    text = lower
+    for word, symbol in _SPOKEN_OPERATORS:
+        text = re.sub(rf"\b{word}\b", f" {symbol} ", text)
+    text = re.sub(r"(?<=\d)\s*x\s*(?=\d)", " * ", text)
+    match = re.search(r"[\d(][\d\s.+\-*/%()]*(?:\bof\b[\d\s.+\-*/%()]*)?[\d)]", text)
+    if not match or not re.search(r"[+\-*/%]", match.group(0)):
+        return None
+    return re.sub(r"\s+", " ", match.group(0)).strip()
+
+
 def _describe_result(name: str, data: dict, is_error: bool) -> str:
     if is_error:
         return f"Sorry, I couldn't do that. {data.get('error', '')}".strip()
+    if name == "end_call":
+        return ""  # the goodbye was already said
+    if name == "calculate":
+        return f"That comes to {data['result']}."
+    if name == "get_weather":
+        degrees = "degrees" if data["units"] == "celsius" else "degrees Fahrenheit"
+        text = f"In {data['location']} it's {data['temperature']} {degrees} with {data['conditions']}."
+        if data.get("today_high") is not None:
+            text += f" Today's high is {data['today_high']} and the low is {data['today_low']}."
+        return text
     if name == "get_current_time":
         return f"It's {data['spoken']}."
     if name == "get_order_status":
