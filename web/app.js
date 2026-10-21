@@ -19,8 +19,14 @@ const ui = {
   stats: $("stats"),
 };
 
-const BARGE_IN_DB = -38; // mic level that counts as the user talking over the agent...
-const BARGE_IN_MS = 160; // ...for this long (keeps stop time well under 300 ms)
+// Barge-in: the user counts as talking over the agent when the mic is louder
+// than BARGE_IN_DB *and* BARGE_IN_MARGIN_DB above the echo of the agent's own
+// voice (whatever the browser's echo cancellation leaves), for BARGE_IN_MS.
+const BARGE_IN_DB = -38;
+const BARGE_IN_MARGIN_DB = 12;
+const BARGE_IN_MS = 160; // keeps stop time well under 300 ms
+const ECHO_LEARN_MS = 240; // at the start of playback, only measure the echo
+const ECHO_MAX_DB = -32; // cap, so a user already talking when playback starts can still interrupt
 const JITTER_S = 0.06; // delay before the first chunk plays, to absorb network jitter
 const BUDGET_MS = 1500;
 
@@ -48,6 +54,9 @@ class Call {
     this.playedEndedMs = 0;
     this.interrupted = new Set();
     this.loudMs = 0;
+    this.ambientDb = -60; // mic level while the agent is silent
+    this.echoDb = -60; // mic level while the agent is talking and the user isn't
+    this.playbackMs = 0; // how long the current stretch of playback has run
     this.ended = false;
     this.closed = false;
   }
@@ -122,13 +131,30 @@ class Call {
   onMicFrame({ pcm, db }) {
     showLevel(db);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(pcm);
+    this.detectBargeIn(db, this.info.frame_ms);
+  }
+
+  detectBargeIn(db, step) {
     if (!this.isPlaying()) {
       this.loudMs = 0;
+      this.playbackMs = 0;
+      this.ambientDb += 0.05 * (db - this.ambientDb);
       return;
     }
-    const step = this.info.frame_ms;
-    this.loudMs = db > BARGE_IN_DB ? this.loudMs + step : Math.max(0, this.loudMs - step);
-    if (this.loudMs >= BARGE_IN_MS) this.bargeIn();
+    if (this.playbackMs === 0) this.echoDb = this.ambientDb;
+    this.playbackMs += step;
+    if (this.playbackMs <= ECHO_LEARN_MS) {
+      this.echoDb = Math.min(ECHO_MAX_DB, Math.max(this.echoDb, this.echoDb + 0.3 * (db - this.echoDb)));
+      return;
+    }
+    const threshold = Math.max(BARGE_IN_DB, this.echoDb + BARGE_IN_MARGIN_DB);
+    if (db > threshold) {
+      this.loudMs += step;
+      if (this.loudMs >= BARGE_IN_MS) this.bargeIn();
+    } else {
+      this.loudMs = Math.max(0, this.loudMs - step);
+      this.echoDb = Math.min(ECHO_MAX_DB, this.echoDb + 0.05 * (db - this.echoDb)); // keep tracking the echo
+    }
   }
 
   bargeIn() {
