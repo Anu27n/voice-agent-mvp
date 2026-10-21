@@ -114,6 +114,14 @@ def validate_arguments(schema: dict[str, Any], args: Any) -> str | None:
 # ------------------------------------------------------------------ sample tools
 
 
+def is_valid_timezone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+    return True
+
+
 def make_get_current_time(default_timezone: str = "") -> Tool:
     def get_current_time(timezone: str | None = None) -> dict[str, Any]:
         tz_name = timezone or default_timezone

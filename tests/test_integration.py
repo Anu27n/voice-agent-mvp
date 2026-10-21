@@ -10,53 +10,22 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import struct
-import threading
 import time
 
 import httpx
-import pytest
-import uvicorn
 from websockets.asyncio.client import connect
 
-from conftest import FIXTURES, fast_settings
+from conftest import FIXTURES, SPOKEN
 from voice_agent.audio import iter_frames, read_wav
-from voice_agent.main import create_app
-
-SPOKEN = ("What time is it right now?", "Can you check the status of order A1001?")
 
 
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-@pytest.fixture
-def server(tmp_path):
-    settings = fast_settings(db_path=str(tmp_path / "calls.db"), mock_stt_script=SPOKEN, mock_tts_ms_per_char=8.0)
-    app = create_app(settings)
-    port = free_port()
-    uv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=uv.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not uv.started:
-        if time.monotonic() > deadline:
-            raise RuntimeError("server did not start")
-        time.sleep(0.02)
-    yield f"127.0.0.1:{port}", app
-    uv.should_exit = True
-    thread.join(timeout=10)
-
-
-async def test_recorded_call_through_the_full_pipeline(server):
-    host, app = server
+async def test_recorded_call_through_the_full_pipeline(live_server):
+    host, app = live_server
     pcm, rate = read_wav(FIXTURES / "two_turns.wav")
 
     async with httpx.AsyncClient(base_url=f"http://{host}") as http:
-        created = await http.post("/sessions")
+        created = await http.post("/sessions", json={"timezone": "Asia/Kolkata"})
         assert created.status_code == 201
         info = created.json()
         assert info["input_sample_rate"] == rate and info["frame_ms"] == 20
@@ -110,6 +79,7 @@ async def test_recorded_call_through_the_full_pipeline(server):
 
     # Tool calls, spoken replies and audio for both turns.
     assert [e["name"] for e in of("tool_call")] == ["get_current_time", "get_order_status"]
+    assert of("tool_result")[0]["result"]["timezone"] == "Asia/Kolkata"  # the caller's zone, not the server's
     replies = {turn: " ".join(e["text"] for e in of("agent_text") if e["turn_id"] == turn) for turn in (1, 2)}
     assert replies[1].startswith("Let me check the time. It's ")
     assert "Order A1001 is shipped" in replies[2]
@@ -127,6 +97,7 @@ async def test_recorded_call_through_the_full_pipeline(server):
     assert saved["session"]["end_reason"] == "user_ended"
     assert saved["session"]["state"] == "ended"
     assert saved["session"]["config"]["providers"] == {"stt": "mock", "llm": "mock", "tts": "mock"}
+    assert saved["session"]["config"]["caller_timezone"] == "Asia/Kolkata"
     assert [(t["turn_id"], t["role"]) for t in saved["transcript"]] == [
         (1, "user"),
         (1, "agent"),
@@ -138,8 +109,8 @@ async def test_recorded_call_through_the_full_pipeline(server):
     assert saved["errors"] == []
 
 
-async def test_unknown_session_is_rejected(server):
-    host, _ = server
+async def test_unknown_session_is_rejected(live_server):
+    host, _ = live_server
     async with connect(f"ws://{host}/ws/voice?session_id=nope") as ws:
         error = json.loads(await ws.recv())
         assert error["code"] == "invalid_session"
@@ -151,3 +122,17 @@ async def test_unknown_session_is_rejected(server):
         health = (await http.get("/healthz")).json()
         assert health["status"] == "ok"
         assert (await http.get("/")).status_code == 200  # the web client is served
+
+
+async def test_session_time_zone_is_optional_and_validated(live_server):
+    host, _ = live_server
+    async with httpx.AsyncClient(base_url=f"http://{host}") as http:
+        for body, expected in (
+            (None, None),
+            ({"timezone": "Mars/Olympus"}, None),
+            ({"timezone": "Europe/Paris"}, "Europe/Paris"),
+        ):
+            created = await http.post("/sessions", json=body)
+            assert created.status_code == 201
+            saved = (await http.get(f"/sessions/{created.json()['session_id']}")).json()
+            assert saved["session"]["config"]["caller_timezone"] == expected

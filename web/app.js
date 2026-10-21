@@ -72,7 +72,11 @@ class Call {
     }
 
     try {
-      const res = await fetch("/sessions", { method: "POST" });
+      const res = await fetch("/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timezone: callerTimezone() }),
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.info = await res.json();
     } catch (err) {
@@ -277,6 +281,14 @@ ui.end.addEventListener("click", () => {
   ui.end.disabled = true;
   if (call) call.end();
 });
+
+function callerTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
 
 function setStatus(state) {
   ui.status.dataset.state = state;

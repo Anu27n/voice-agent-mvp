@@ -1,6 +1,6 @@
 """HTTP and WebSocket endpoints.
 
-POST /sessions            -> {session_id, input_sample_rate, frame_ms, output_sample_rate}
+POST /sessions {timezone?} -> {session_id, input_sample_rate, frame_ms, output_sample_rate}
 GET  /sessions/{id}       -> {session, transcript, metrics, errors}
 WS   /ws/voice?session_id -> binary audio + JSON events (see docs/DESIGN.md)
 GET  /                    -> the web client
@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 
 from .agent import Agent
@@ -23,11 +24,15 @@ from .pipeline import VoicePipeline
 from .providers import LLMProvider, STTProvider, TTSProvider, build_llm, build_stt, build_tts
 from .session import SessionManager
 from .store import Store
-from .tools import ToolExecutor, default_tools
+from .tools import ToolExecutor, default_tools, is_valid_timezone
 
 log = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+class SessionRequest(BaseModel):
+    timezone: str | None = None  # the caller's IANA time zone, e.g. "Asia/Kolkata"
 
 
 class WebSocketTransport:
@@ -58,15 +63,20 @@ def create_app(
     llm = llm or build_llm(settings)
     tts = tts or build_tts(settings)
     store = store or Store(settings.db_path)
-    tools = ToolExecutor(default_tools(settings.default_timezone), timeout_s=settings.tool_timeout_s)
-    agent = Agent(
-        llm,
-        tools,
-        settings.system_prompt,
-        timeout_s=settings.llm_timeout_s,
-        max_tool_rounds=settings.max_tool_rounds,
-    )
     manager = SessionManager(store, settings)
+
+    def make_agent(caller_timezone: str | None) -> Agent:
+        # Per call, so "what time is it?" answers in the caller's time zone.
+        tools = ToolExecutor(
+            default_tools(caller_timezone or settings.default_timezone), timeout_s=settings.tool_timeout_s
+        )
+        return Agent(
+            llm,
+            tools,
+            settings.system_prompt,
+            timeout_s=settings.llm_timeout_s,
+            max_tool_rounds=settings.max_tool_rounds,
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -83,8 +93,12 @@ def create_app(
     app.state.providers = {"stt": stt, "llm": llm, "tts": tts}
 
     @app.post("/sessions", status_code=201)
-    async def create_session() -> dict:
-        session = await manager.create()
+    async def create_session(request: SessionRequest | None = None) -> dict:
+        timezone = request.timezone if request else None
+        if timezone and not is_valid_timezone(timezone):
+            log.warning("ignoring unknown caller time zone %r", timezone)
+            timezone = None
+        session = await manager.create(timezone=timezone)
         return {
             "session_id": session.id,
             "input_sample_rate": settings.input_sample_rate,
@@ -121,7 +135,13 @@ def create_app(
             return
 
         pipeline = VoicePipeline(
-            session, settings, stt=stt, agent=agent, tts=tts, store=store, transport=WebSocketTransport(ws)
+            session,
+            settings,
+            stt=stt,
+            agent=make_agent(session.timezone),
+            tts=tts,
+            store=store,
+            transport=WebSocketTransport(ws),
         )
         await pipeline.start()
         try:

@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import struct
 import sys
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 import pytest
+import uvicorn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from voice_agent.agent import Agent  # noqa: E402
 from voice_agent.audio import to_pcm16  # noqa: E402
 from voice_agent.config import Settings  # noqa: E402
+from voice_agent.main import create_app  # noqa: E402
 from voice_agent.pipeline import VoicePipeline  # noqa: E402
 from voice_agent.providers.mock import MockLLM, MockSTT, MockTTS  # noqa: E402
 from voice_agent.session import Session  # noqa: E402
@@ -25,6 +30,8 @@ from voice_agent.tools import ToolExecutor, default_tools  # noqa: E402
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SAMPLE_RATE = 16000
 FRAME_MS = 20
+# What tests/fixtures/two_turns.wav says; the mock STT "hears" these in order.
+SPOKEN = ("What time is it right now?", "Can you check the status of order A1001?")
 
 
 def fast_settings(**overrides: Any) -> Settings:
@@ -156,3 +163,29 @@ async def harness_factory():
     for harness in created:
         if not harness.pipeline.ended.is_set():
             await harness.stop()
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture
+def live_server(tmp_path):
+    """The real app on a real port (mock providers), served from a background thread.
+    Yields ("127.0.0.1:<port>", app)."""
+    settings = fast_settings(db_path=str(tmp_path / "calls.db"), mock_stt_script=SPOKEN, mock_tts_ms_per_char=8.0)
+    app = create_app(settings)
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        if time.monotonic() > deadline:
+            raise RuntimeError("server did not start")
+        time.sleep(0.02)
+    yield f"127.0.0.1:{port}", app
+    server.should_exit = True
+    thread.join(timeout=10)
