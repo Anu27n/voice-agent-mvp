@@ -174,9 +174,17 @@ REST:
 
 | Endpoint | Response |
 | --- | --- |
-| `POST /sessions` | optional body `{timezone}` (IANA name; unknown names are ignored) -> `201 {session_id, input_sample_rate, frame_ms, output_sample_rate}` |
+| `POST /sessions` | optional body `{timezone}` (IANA name; unknown names are ignored) -> `201 {session_id, input_sample_rate, frame_ms, output_sample_rate}`; `429` at `MAX_ACTIVE_CALLS` |
+| `GET /sessions?limit=` | recent calls: `{id, started_at, ended_at, end_reason, user_turns, errors, first_words, median_total_ms, providers, state}` |
 | `GET /sessions/{id}` | `{session, transcript[], metrics[], errors[]}`; 404 if unknown |
-| `GET /healthz` | `{status, providers, active_sessions}` |
+| `GET /sessions/{id}/transcript.md` | the call as Markdown: transcript, tool calls, latency table, errors |
+| `GET /metrics/summary?last=` | `{turns, stages: {stage: {n, median, p90}}}` |
+| `GET /metrics` | Prometheus text: active calls, calls by end reason, turns, barge-ins, errors by stage, stage latency quantiles |
+| `GET /healthz` | `{status, providers, demo_mode, access_code_required, active_sessions, max_active_calls}` |
+
+When `ACCESS_CODE` is set, every endpoint except `/healthz` and the static files
+needs it (`X-Access-Code` header or `code` query parameter). So does the
+WebSocket, which otherwise closes with code `4401`.
 
 WebSocket `/ws/voice?session_id=...`. Binary frames carry audio; text frames carry
 JSON objects with a `type` field.
@@ -185,23 +193,27 @@ JSON objects with a `type` field.
 | --- | --- | --- | --- |
 | audio (binary) | client -> server | PCM16 16 kHz mono frames | user speech |
 | `interrupt` | client -> server | `{turn_id, played_ms?}` | barge-in; `played_ms` = how much of that turn the user heard |
+| `user_text` | client -> server | `{text}` | typed message; handled like a final transcript (and interrupts a reply in progress) |
 | `end_call` | client -> server | `{}` | End Call button |
 | `ping` | client -> server | `{}` | answered with `pong` |
 | `state` | server -> client | `{state}` | `listening` / `thinking` / `speaking` |
 | `transcript_partial` | server -> client | `{text}` | live captions |
-| `transcript_final` | server -> client | `{text, turn_id}` | committed user turn |
+| `transcript_final` | server -> client | `{text, turn_id, source}` | committed user turn; `source` is `voice` or `text` |
 | `agent_text` | server -> client | `{text, turn_id}` | agent caption, one sentence at a time |
 | agent_audio (binary) | server -> client | `uint32 turn_id` + PCM16 | agent speech |
 | `tool_call` | server -> client | `{turn_id, name, arguments}` | shown in the transcript |
 | `tool_result` | server -> client | `{turn_id, name, is_error, result}` | shown in the transcript |
 | `metrics` | server -> client | `{turn_id, vad_end_ms, stt_final_ms, llm_first_token_ms, tts_first_audio_ms, total_ms}` | latency panel |
 | `error` | server -> client | `{code, message, stage?}` | recoverable error |
-| `call_ended` | server -> client | `{reason}` | `user_ended` / `silence_timeout` / `max_duration` / `disconnected` |
+| `call_ended` | server -> client | `{reason}` | `user_ended` / `agent_ended` / `silence_timeout` / `max_duration` / `disconnected` |
 
-`end_call`, `ping`, `tool_call`, `tool_result`, `metrics` and the optional
-`played_ms` are additions to the spec's event list; nothing in the spec's list
-changed meaning. A `turn_id` is an integer shared by a user utterance and the
-agent reply to it.
+`user_text`, `end_call`, `ping`, `tool_call`, `tool_result`, `metrics`,
+`source` and the optional `played_ms` are additions to the spec's event list;
+nothing in the spec's list changed meaning. A `turn_id` is an integer shared by a
+user turn and the agent reply to it.
+
+`call_ended` is sent only after the call is fully saved and no longer counts as
+active. A client that reads the API right after `call_ended` sees the final state.
 
 ## 7. Provider interfaces
 
@@ -331,10 +343,49 @@ client's 60 ms jitter buffer.
 | Tool call fails | unknown tool, invalid arguments, exception or timeout become an `is_error` result; the LLM explains it | `tools.py` |
 | Max duration / silence timeout | short goodbye, then `call_ended` | `pipeline._watch`, `end` |
 | Refusal | short polite line; the refused content is not replayed | `agent.py` |
+| No microphone at all | the mic-denied message offers a text-only call | `web/app.js` |
+| Too many calls / wrong access code | `429` / `401` with a clear message on the page | `main.py`, `web/common.js` |
 
 Timeouts: STT 4 s (end of speech to transcript), LLM 10 s (to first token and
 between tokens), TTS 5 s (to first chunk and between chunks), tools 5 s. All are
 configurable.
+
+## 11a. Tools, hanging up, typed turns
+
+| Tool | What it does | Notes |
+| --- | --- | --- |
+| `get_current_time` | time in any IANA zone | defaults to the caller's zone sent at session start |
+| `get_order_status` | mock order service | unknown IDs return an error the model explains |
+| `calculate` | exact arithmetic, percentages, `sqrt`/`abs`/`round` | evaluated from the AST; no names, attributes or arbitrary calls; size limits on powers and results |
+| `get_weather` | current conditions and today's high/low | Open-Meteo geocoding + forecast, no API key; `ENABLE_WEATHER=false` removes it |
+| `end_call` | hangs up after the goodbye | sets a per-call flag; when the reply has finished playing the call ends with `agent_ended`; barging in clears it |
+
+Each call gets its own tool set, so the time default and the hang-up flag
+belong to that call only. Tool results are JSON (UTF-8).
+
+A typed message (`user_text`) skips VAD and STT. It is committed as a user turn
+(`source: "text"`) and answered exactly like speech, so a text-only call is the
+same pipeline without a microphone. Typing while the agent is speaking interrupts
+it like barge-in. Typed turns record `llm_first_token_ms` and `tts_first_audio_ms`.
+They leave the speech stages and `total_ms` empty, so they never skew the
+speech-latency statistics.
+
+## 11b. Deployment
+
+- **Provider auto-selection.** `STT_PROVIDER`, `LLM_PROVIDER` and `TTS_PROVIDER`
+  default to `auto`, which uses the real provider when its key is set and the mock
+  otherwise. The same image is a demo with no keys and a real agent with them;
+  `/healthz` and the page report demo mode.
+- **Public URLs.** `ACCESS_CODE` gates the API and the socket. `MAX_ACTIVE_CALLS`
+  bounds concurrent calls, and `MAX_CALL_DURATION_S` bounds each call, which
+  together cap provider spend.
+- **Image.** `python:3.12-slim`, dependencies in their own layer, non-root user,
+  Docker `HEALTHCHECK` on `/healthz`, JSON logs. Listens on `HOST=0.0.0.0` and
+  `$PORT`.
+- **Render.** `render.yaml` defines one free web service built from the
+  Dockerfile. Its health check is `/healthz`, it auto-deploys from `main`, and the
+  API keys and access code are prompted as secrets. CI builds the image and
+  smoke-tests the container on every push.
 
 ## 12. Persistence
 
@@ -366,8 +417,10 @@ SQLite (`DB_PATH`), written as the call happens:
   against the real server.
 - **Live:** `pytest -m live` runs the Deepgram and Anthropic adapters against the
   real APIs when keys are set.
+- **API:** the access code (HTTP and WebSocket), the call limit, history,
+  Markdown transcripts, the metrics summary and Prometheus output.
 - **CI:** GitHub Actions runs `ruff` and the suite on Linux (Python 3.11, 3.12) and
-  Windows.
+  Windows. It also builds the Docker image and smoke-tests the running container.
 
 ## 14. Limitations and next steps
 
@@ -378,5 +431,6 @@ SQLite (`DB_PATH`), written as the call happens:
   better with noise.
 - The server estimates when playback ends. A `playback_done` event from the
   client would make the LISTENING transition exact.
-- One process, in-memory live sessions; horizontal scaling, auth and telephony
-  are out of scope, per the spec.
+- One process, in-memory live sessions, SQLite on local disk (reset by a redeploy
+  on Render's free plan). The access code is a shared secret, not user accounts.
+  Horizontal scaling, real auth and telephony are out of scope, per the spec.
