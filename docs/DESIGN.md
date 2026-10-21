@@ -60,9 +60,11 @@ flowchart LR
 | VAD | `voice_agent/vad.py` | speech start / end on 20 ms frames |
 | Agent | `voice_agent/agent.py` | tool loop, append-only conversation history |
 | Sentence splitter | `voice_agent/sentences.py` | token stream -> speakable sentences |
+| Speech cleanup | `voice_agent/speakable.py` | strips markdown, emoji and URLs before TTS |
 | Tools | `voice_agent/tools.py` | argument validation, timeouts, sample tools |
 | Providers | `voice_agent/providers/` | interfaces (`base.py`), registry, Deepgram, Anthropic, ElevenLabs, mocks |
-| Metrics | `voice_agent/metrics.py` | per-turn timer, median / p90 |
+| Metrics | `voice_agent/metrics.py`, `report.py` | per-turn timer, median / p90, Markdown report |
+| Benchmark | `voice_agent/benchmark.py` | replays recorded speech into a running server for N turns |
 | Store | `voice_agent/store.py` | SQLite persistence |
 | Web client | `web/` | mic capture worklet, playback, captions, status, barge-in |
 
@@ -120,8 +122,8 @@ sequenceDiagram
 Step by step, matching the spec:
 
 1. **Start call.** The client asks for the microphone *first*, so a denial never
-   creates a session. Then `POST /sessions`, open the WebSocket, start streaming.
-   State -> LISTENING.
+   creates a session. Then `POST /sessions` with the browser's time zone, open the
+   WebSocket, start streaming. State -> LISTENING.
 2. **Listen.** The VAD runs on every frame. A segment starts after 100 ms of
    voiced frames, so clicks and taps never start one. Its frames, plus 300 ms of
    pre-roll, go to a new streaming STT session.
@@ -132,9 +134,10 @@ Step by step, matching the spec:
 4. **Think.** The transcript is appended to the history and the LLM is called
    with the system prompt, history and tools. Tool calls run in the Tool
    Executor and their results go back to the LLM; tokens stream throughout.
-5. **Speak.** Tokens are buffered into sentences; each complete sentence goes to
-   TTS immediately, its text as `agent_text`, its audio as `agent_audio`. State
-   -> SPEAKING on the first audio chunk.
+5. **Speak.** Tokens are buffered into sentences. Each complete sentence is cleaned
+   of anything TTS would read literally: markdown, list markers, emoji and URLs
+   (`speakable.py`). It then goes to TTS immediately, its text as `agent_text`,
+   its audio as `agent_audio`. State -> SPEAKING on the first audio chunk.
 6. **Barge-in.** See section 8.
 7. **Next turn.** The server tracks how much audio it has sent and when, and
    returns to LISTENING once the client should have finished playing it (plus
@@ -171,7 +174,7 @@ REST:
 
 | Endpoint | Response |
 | --- | --- |
-| `POST /sessions` | `201 {session_id, input_sample_rate, frame_ms, output_sample_rate}` |
+| `POST /sessions` | optional body `{timezone}` (IANA name; unknown names are ignored) -> `201 {session_id, input_sample_rate, frame_ms, output_sample_rate}` |
 | `GET /sessions/{id}` | `{session, transcript[], metrics[], errors[]}`; 404 if unknown |
 | `GET /healthz` | `{status, providers, active_sessions}` |
 
@@ -206,17 +209,21 @@ agent reply to it.
 class STTProvider(ABC):
     async def open_stream(self, *, sample_rate: int, on_partial) -> STTStream: ...
 
+
 class STTStream(ABC):
     async def send(self, pcm: bytes) -> None: ...
-    async def finish(self) -> str: ...        # end of audio -> final transcript
+    async def finish(self) -> str: ...  # end of audio -> final transcript
     async def aclose(self) -> None: ...
+
 
 class LLMProvider(ABC):
     def stream(self, *, system, messages, tools) -> AsyncIterator[TextDelta | LLMTurnEnd]: ...
 
+
 class TTSProvider(ABC):
     sample_rate: int
-    def synthesize(self, text: str) -> AsyncIterator[bytes]: ...   # PCM16 chunks
+
+    def synthesize(self, text: str) -> AsyncIterator[bytes]: ...  # PCM16 chunks
 ```
 
 Closing an LLM or TTS iterator early cancels the request; that is how barge-in
@@ -238,10 +245,14 @@ at all, since `TTS_PROVIDER=my_pkg.tts:MyTTS` imports the class and builds it fr
 ## 8. Barge-in
 
 1. **Client detection.** While agent audio is playing, the client checks the
-   level of each mic frame (after the browser's echo cancellation). Over -38 dBFS
-   for 160 ms counts as the user talking. It stops all scheduled audio at once,
-   drops any further audio for that turn id, and sends
-   `interrupt {turn_id, played_ms}`.
+   level of each mic frame (after the browser's echo cancellation). During the
+   first 240 ms of playback it only measures the *echo level*, meaning how loud
+   the agent's own voice is in the mic. After that, the user counts as talking
+   when the mic stays above both -38 dBFS and the echo level + 12 dB for 160 ms.
+   The echo estimate keeps tracking during playback. It is capped at -32 dBFS, so
+   a user who was already talking when playback began can still interrupt. On a
+   barge-in the client stops all scheduled audio at once, drops any further audio
+   for that turn id, and sends `interrupt {turn_id, played_ms}`.
 2. **Server side.** The reply task is cancelled. That closes the LLM stream and
    the TTS stream, so the requests stop. Queued audio for the turn is dropped.
    State -> LISTENING.
@@ -302,7 +313,10 @@ The stages are back to back, so they add up to `total_ms`. When the model speaks
 before calling a tool ("Let me check that."), first audio comes from that
 sentence, so the tool round trip is hidden. Metrics go to the client
 (`metrics` event, shown in the latency panel) and into the `metrics` table.
-`scripts/latency_report.py` prints median and p90 per stage over the last N turns.
+`python -m voice_agent.benchmark --turns 20` acts as a caller. It replays the
+recorded questions into a running server in real time and reports the median and
+p90 per stage for that call. `scripts/latency_report.py` does the same for the
+last N turns of any calls.
 Not counted: client-to-server network time before the last voiced frame, and the
 client's 60 ms jitter buffer.
 
@@ -348,14 +362,18 @@ SQLite (`DB_PATH`), written as the call happens:
   `tests/fixtures/two_turns.wav` (two recorded questions with a click between
   them) over a real WebSocket. It checks transcripts, tool calls, audio, metrics
   and the persisted session.
+- **Benchmark:** the benchmark itself runs in the suite: 4 turns at 4x speed
+  against the real server.
 - **Live:** `pytest -m live` runs the Deepgram and Anthropic adapters against the
   real APIs when keys are set.
+- **CI:** GitHub Actions runs `ruff` and the suite on Linux (Python 3.11, 3.12) and
+  Windows.
 
 ## 14. Limitations and next steps
 
-- Barge-in detection is energy-based on the client, so it relies on the
-  browser's echo cancellation. Headphones make it most reliable; a server-side
-  check with a model VAD (e.g. Silero) would be the next step.
+- Barge-in detection is energy-based on the client. It adapts to the agent's
+  echo, but a loud echo can still mask quiet speech. A server-side check with a
+  model VAD (e.g. Silero) would be the next step.
 - The VAD is energy-based. It is fine for a quiet room; a neural VAD would cope
   better with noise.
 - The server estimates when playback ends. A `playback_done` event from the

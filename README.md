@@ -1,5 +1,7 @@
 # Voice Agent MVP
 
+[![CI](https://github.com/Anu27n/voice-agent-mvp/actions/workflows/ci.yml/badge.svg)](https://github.com/Anu27n/voice-agent-mvp/actions/workflows/ci.yml)
+
 A voice agent you talk to in real time from a web page. It listens, transcribes
 with streaming speech-to-text, decides how to respond with Claude (calling tools
 when needed), and speaks the reply back with streaming text-to-speech. You can
@@ -8,9 +10,14 @@ interrupt it mid-sentence, and it remembers the conversation until you hang up.
 - **Streaming end to end.** Live captions, token streaming, and sentence-by-sentence TTS.
   The agent starts talking while the rest of the reply is still being generated.
 - **Barge-in.** Talk over the agent and playback stops after 160 ms of detected speech.
-  Your words become the next turn, and only what you actually heard is kept in the history.
-- **Tool calling.** `get_current_time` (any time zone) and `get_order_status` (mock order
-  service). Failures are reported back to the model, which explains them.
+  Detection learns the level of the agent's own echo, so speakers don't cause false
+  interruptions. Your words become the next turn, and only what you actually heard is
+  kept in the history.
+- **Tool calling.** `get_current_time` (in the caller's own time zone, or any other) and
+  `get_order_status` (mock order service). Failures are reported back to the model, which
+  explains them.
+- **Speech-safe replies.** Markdown, list markers, emoji and URLs are cleaned out before
+  TTS, so the agent never reads "asterisk asterisk" aloud.
 - **Per-stage latency** (VAD, STT, LLM, TTS, total) for every turn. It shows live in the UI,
   is stored in SQLite, and gets summarized by a report script.
 - **Pluggable providers.** Deepgram STT, Claude, Deepgram or ElevenLabs TTS, plus offline
@@ -103,7 +110,7 @@ All settings are environment variables (or `.env`). The main ones:
 | `STT_TIMEOUT_S` / `LLM_TIMEOUT_S` / `TTS_TIMEOUT_S` / `TOOL_TIMEOUT_S` | `4` / `10` / `5` / `5` | per-stage timeouts |
 | `TTS_SAMPLE_RATE` | `24000` | agent audio sample rate |
 | `DEEPGRAM_STT_MODEL` / `DEEPGRAM_TTS_MODEL` | `nova-3` / `aura-2-thalia-en` | Deepgram models |
-| `DEFAULT_TIMEZONE` | server local | time zone for `get_current_time` when none is given |
+| `DEFAULT_TIMEZONE` | server local | time zone for `get_current_time` when the caller's isn't known |
 | `HOST` / `PORT` / `DB_PATH` / `LOG_LEVEL` | `127.0.0.1` / `8000` / `data/voice_agent.db` / `INFO` | server |
 
 Every field of `voice_agent/config.py:Settings` can be set the same way (upper-case name).
@@ -124,7 +131,7 @@ setting at it, for example `TTS_PROVIDER=my_pkg.tts:MyTTS`. The pipeline never c
 
 | Endpoint | |
 | --- | --- |
-| `POST /sessions` | creates a session; returns `session_id` and the audio formats |
+| `POST /sessions` | creates a session (optional body `{"timezone": "Asia/Kolkata"}`); returns `session_id` and the audio formats |
 | `WS /ws/voice?session_id=...` | binary audio both ways plus JSON events |
 | `GET /sessions/{id}` | the saved transcript, per-turn metrics and errors |
 | `GET /healthz` | providers in use and active calls |
@@ -149,17 +156,31 @@ With real keys in the environment, `pytest -m live` also checks the Deepgram and
 Claude adapters against the live APIs. `python scripts/make_fixture.py`
 regenerates the WAV (Windows speech synthesis).
 
+CI (GitHub Actions) runs `ruff` and the full test suite on Linux (Python 3.11 and
+3.12) and Windows for every push and pull request.
+
 ## Latency report
 
-Every turn's stage timings are stored. After a call with 20 or more turns:
+Every turn's stage timings are stored. To produce the 20-turn report without
+talking for 20 turns, run the benchmark against a running server. It acts as a
+caller, replaying the recorded questions in real time:
 
 ```bash
-python scripts/latency_report.py --last 20 --out docs/latency-report.md
+python -m voice_agent.benchmark --turns 20 --out docs/latency-report.md
 ```
 
-It prints median and p90 per stage (VAD end, STT final, LLM first token, TTS
-first audio, total) and checks the median total against the 1.5 s budget. The
-same numbers show live in the page's latency panel.
+It prints each turn as it goes, then the median and p90 per stage (VAD end, STT
+final, LLM first token, TTS first audio, total) and checks the median total against
+the 1.5 s budget. Run it with the real providers configured for numbers worth
+reporting.
+
+To report on calls you made yourself instead, use the report script:
+
+```bash
+python scripts/latency_report.py --last 20
+```
+
+The same numbers show live in the page's latency panel.
 
 ## Project layout
 
@@ -172,14 +193,18 @@ voice_agent/
   vad.py             energy VAD
   agent.py           tool loop and append-only history
   sentences.py       token stream -> sentences
+  speakable.py       strips markdown, emoji and URLs before TTS
   tools.py           tool executor and sample tools
   timeline.py        what the caller heard, for barge-in
   metrics.py         per-turn timing, median / p90
+  report.py          Markdown latency report
+  benchmark.py       replays recorded speech into a running server (python -m voice_agent.benchmark)
   store.py           SQLite persistence
   config.py          settings from the environment
   providers/         interfaces, registry, anthropic, deepgram, elevenlabs, mock
 web/                 browser client (index.html, app.js, mic-worklet.js, styles.css)
 scripts/             latency report, fixture generator
+.github/workflows/   CI: lint and tests on Linux and Windows
 tests/               unit, pipeline, integration and live tests
 docs/DESIGN.md       design doc
 ```
@@ -189,7 +214,7 @@ docs/DESIGN.md       design doc
 | Criterion | Where |
 | --- | --- |
 | 5+ turn conversation with memory | `test_five_turn_conversation_remembers_and_uses_tools`; history in `agent.py` |
-| Median end of speech to first audio <= 1.5 s | measured per turn; `scripts/latency_report.py` over 20 real turns |
+| Median end of speech to first audio <= 1.5 s | measured per turn; `python -m voice_agent.benchmark --turns 20` with real providers |
 | Live partial and final captions | `transcript_partial` / `transcript_final`; partial line in the UI |
 | Barge-in stops audio within ~300 ms | client stops playback after 160 ms of speech; server cancels LLM and TTS (`test_client_barge_in_...`) |
 | Sample tool invoked when relevant | `get_current_time`, `get_order_status`; tool chips in the transcript |
@@ -204,13 +229,12 @@ docs/DESIGN.md       design doc
 With real keys, open the page and do a multi-turn call: ask the time somewhere,
 ask about order `A1001`, then interrupt a long answer ("tell me a story about...")
 mid-sentence. Run `python scripts/latency_report.py` afterwards for the latency
-numbers. Headphones give the cleanest barge-in, since nothing echoes back into
-the mic.
+numbers.
 
 ## Limitations
 
-- Barge-in and VAD are energy-based. They work well in a quiet room or with
-  headphones; a neural VAD would be the upgrade for noisy rooms and speakerphones.
+- Barge-in and VAD are energy-based. Barge-in adapts to the agent's echo, and both
+  work well in a normal room; a neural VAD would be the upgrade for very noisy rooms.
 - When to return to listening is estimated from the audio sent, not reported
   by the client.
 - Single process, no auth, English only: horizontal scaling, telephony, auth
