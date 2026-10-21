@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice Agent</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="top">
+        <div>
+          <h1>Voice Agent</h1>
+          <p class="sub">Talk naturally. You can interrupt at any time.</p>
+        </div>
+        <div class="status" id="status" data-state="idle" role="status">
+          <span class="dot"></span><span id="status-label">Idle</span>
+        </div>
+      </header>
+
+      <section class="controls">
+        <button id="start" class="btn primary" type="button">Start Call</button>
+        <button id="end" class="btn danger" type="button" disabled>End Call</button>
+        <div class="meter" title="Microphone level" aria-hidden="true"><div id="level"></div></div>
+      </section>
+
+      <div id="banner" class="banner" role="alert" hidden></div>
+
+      <section class="transcript" id="transcript" aria-live="polite">
+        <p class="empty" id="empty">
+          Press <strong>Start Call</strong> and allow microphone access. Try
+          <em>"What time is it in Tokyo?"</em> or <em>"Where is order A1001?"</em>
+        </p>
+      </section>
+      <p class="partial" id="partial" aria-live="polite"></p>
+
+      <section class="latency">
+        <div class="latency-head">
+          <h2>Latency</h2>
+          <span class="legend">
+            <i class="k vad"></i>VAD <i class="k stt"></i>STT <i class="k llm"></i>LLM <i class="k tts"></i>TTS
+          </span>
+        </div>
+        <div class="bar" id="bar"><span class="budget" title="1.5 s budget"></span></div>
+        <p class="stats" id="stats">Speak to see how long each stage takes.</p>
+      </section>
+    </main>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
