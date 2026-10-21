@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import re
 
-# Sentence-final punctuation, optional closing quotes/brackets, then whitespace.
-_BOUNDARY = re.compile(r"[.!?]+[\"'”’)\]]*(?=\s)")
+# Sentence-final punctuation, optional closing quotes/brackets/emphasis, then whitespace.
+_BOUNDARY = re.compile(r"[.!?]+[\"'”’)\]*_]*(?=\s)")
 _ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "st", "vs", "etc", "e.g", "i.e", "jr", "sr", "approx"}
 
 

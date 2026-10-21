@@ -32,6 +32,7 @@ from .metrics import TurnTimer
 from .providers.base import LLMError, ProviderError, STTError, STTProvider, TTSError, TTSProvider
 from .sentences import SentenceSplitter
 from .session import Session
+from .speakable import speakable
 from .state import CallState
 from .store import Store
 from .timeline import SpeechTimeline
@@ -488,16 +489,21 @@ class VoicePipeline:
 
     async def _produce_sentences(self, reply: Reply, run: AgentRun, out: asyncio.Queue) -> None:
         splitter = SentenceSplitter()
+
+        def emit(sentences: list[str]) -> None:
+            for sentence in sentences:
+                spoken = speakable(sentence)
+                if spoken:  # a sentence of pure markup has nothing to say
+                    out.put_nowait((spoken, run.round_index))
+
         try:
             async for event in run.events():
                 if isinstance(event, AgentText):
                     if reply.timer.llm_first_token is None:
                         reply.timer.llm_first_token = self._clock()
-                    for sentence in splitter.push(event.text):
-                        out.put_nowait((sentence, run.round_index))
+                    emit(splitter.push(event.text))
                 elif isinstance(event, AgentRoundEnd):
-                    for sentence in splitter.flush():
-                        out.put_nowait((sentence, run.round_index))
+                    emit(splitter.flush())
                 elif isinstance(event, AgentToolCall):
                     call = event.call
                     self._outbox.event("tool_call", turn_id=reply.turn_id, name=call.name, arguments=call.arguments)
@@ -510,8 +516,7 @@ class VoicePipeline:
                         is_error=result.is_error,
                         result=json.loads(result.content),
                     )
-            for sentence in splitter.flush():
-                out.put_nowait((sentence, run.round_index))
+            emit(splitter.flush())
         finally:
             out.put_nowait(None)
 

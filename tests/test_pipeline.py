@@ -5,10 +5,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 from conftest import fast_settings, silence, speech, wait_for
 from voice_agent.pipeline import FALLBACK_LINE, MAX_DURATION_GOODBYE, SILENCE_GOODBYE
-from voice_agent.providers.base import LLMProvider, TTSError, TTSProvider
+from voice_agent.providers.base import ChatMessage, LLMProvider, LLMTurnEnd, TextDelta, TTSError, TTSProvider
+
+
+class MarkdownLLM(LLMProvider):
+    """A model that ignores the 'plain spoken language' instruction."""
+
+    TEXT = "**Sure!** Here are your options:\n- Express shipping 🚚\n- Standard shipping\n"
+
+    async def stream(self, *, system, messages, tools):
+        for piece in re.findall(r"\S+\s*", self.TEXT):
+            yield TextDelta(piece)
+        yield LLMTurnEnd(ChatMessage("assistant", text=self.TEXT), "end_turn")
+
+
+async def test_markdown_is_cleaned_before_it_is_spoken(harness_factory):
+    h = await harness_factory(llm=MarkdownLLM())
+    await h.say()
+    await h.wait_listening_after(1)
+    await h.flush()
+    expected = ["Sure!", "Here are your options:", "Express shipping", "Standard shipping"]
+    assert [e["text"] for e in h.transport.of("agent_text")] == expected
+    assert h.tts.spoken == expected
 
 
 async def test_single_turn_happy_path(harness_factory):
