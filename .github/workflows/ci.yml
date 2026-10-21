@@ -30,3 +30,22 @@ jobs:
         shell: bash
       - name: Test
         run: pytest -q
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t voice-agent .
+      - name: Smoke test the container
+        run: |
+          docker run -d --name agent -p 8000:8000 voice-agent
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8000/healthz | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:8000/ | grep -q "<title>Voice Agent</title>"
+          curl -fsS -X POST http://127.0.0.1:8000/sessions | grep -q session_id
+          curl -fsS http://127.0.0.1:8000/metrics | grep -q voice_agent_active_calls
+      - name: Container logs
+        if: always()
+        run: docker logs agent || true
