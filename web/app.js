@@ -1,19 +1,29 @@
-// Voice Agent web client: mic capture, playback, captions, status and barge-in.
+// Voice Agent web client: mic capture, playback, captions, status, barge-in,
+// typed messages and mute.
 //
 // Protocol (see docs/DESIGN.md): the client streams PCM16 mono frames at the
 // rate POST /sessions returns; the server sends JSON events and binary
 // agent_audio frames of [uint32 LE turn_id][PCM16 mono at output_sample_rate].
 
+import { api, withCode } from "./common.js";
+
 const $ = (id) => document.getElementById(id);
 const ui = {
   start: $("start"),
   end: $("end"),
+  mute: $("mute"),
   status: $("status"),
   statusLabel: $("status-label"),
+  demo: $("demo"),
   banner: $("banner"),
+  bannerText: $("banner-text"),
+  textOnly: $("text-only"),
   transcript: $("transcript"),
   empty: $("empty"),
   partial: $("partial"),
+  composer: $("composer"),
+  message: $("message"),
+  send: $("send"),
   level: $("level"),
   bar: $("bar"),
   stats: $("stats"),
@@ -41,18 +51,21 @@ const STATUS_LABELS = {
 };
 const END_REASONS = {
   user_ended: "Call ended.",
+  agent_ended: "The agent said goodbye and ended the call.",
   silence_timeout: "Call ended after a long silence.",
   max_duration: "Call ended: maximum call length reached.",
   disconnected: "Call ended: connection lost.",
 };
 
 class Call {
-  constructor() {
+  constructor({ textOnly = false } = {}) {
+    this.textOnly = textOnly;
     this.sources = new Set(); // scheduled agent audio
     this.cursor = 0; // AudioContext time where the next chunk should start
     this.playingTurn = null;
     this.playedEndedMs = 0;
     this.interrupted = new Set();
+    this.muted = false;
     this.loudMs = 0;
     this.ambientDb = -60; // mic level while the agent is silent
     this.echoDb = -60; // mic level while the agent is talking and the user isn't
@@ -63,53 +76,61 @@ class Call {
 
   async start() {
     setStatus("connecting");
-    // Ask for the microphone first: if it's denied, no session is created.
-    try {
-      this.mic = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-    } catch (err) {
-      const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
-      showBanner(
-        denied
-          ? "Microphone access was denied. Allow it in your browser's site settings, then press Start Call again."
-          : `Couldn't open the microphone: ${err.message || err}`,
-        "error",
-      );
-      setStatus("idle");
-      return false;
+    if (!this.textOnly) {
+      // Ask for the microphone first: if it's denied, no session is created.
+      try {
+        this.mic = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+      } catch (err) {
+        const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
+        showBanner(
+          denied
+            ? "Microphone access was denied. Allow it in your browser's site settings, then press Start Call again."
+            : `Couldn't open the microphone: ${err.message || err}`,
+          "error",
+          0,
+          { offerTextOnly: true },
+        );
+        setStatus("idle");
+        return false;
+      }
     }
 
     try {
-      const res = await fetch("/sessions", {
+      const res = await api("/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ timezone: callerTimezone() }),
       });
+      if (res.status === 429) throw new Error("too many calls are in progress right now. Try again in a minute");
+      if (res.status === 401) throw new Error("an access code is required");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.info = await res.json();
     } catch (err) {
       this.stopMic();
-      showBanner(`Couldn't start a session: ${err.message}`, "error");
+      showBanner(`Couldn't start a call: ${err.message}.`, "error");
       setStatus("idle");
       return false;
     }
 
     this.ctx = new AudioContext();
     await this.ctx.resume();
-    await this.ctx.audioWorklet.addModule("mic-worklet.js");
-    const source = this.ctx.createMediaStreamSource(this.mic);
-    this.node = new AudioWorkletNode(this.ctx, "mic-capture", {
-      processorOptions: { targetRate: this.info.input_sample_rate, frameMs: this.info.frame_ms },
-    });
-    this.node.port.onmessage = (event) => this.onMicFrame(event.data);
-    const mute = this.ctx.createGain();
-    mute.gain.value = 0; // keeps the worklet running without playing the mic back
-    source.connect(this.node).connect(mute).connect(this.ctx.destination);
+    if (this.mic) {
+      await this.ctx.audioWorklet.addModule("mic-worklet.js");
+      const source = this.ctx.createMediaStreamSource(this.mic);
+      this.node = new AudioWorkletNode(this.ctx, "mic-capture", {
+        processorOptions: { targetRate: this.info.input_sample_rate, frameMs: this.info.frame_ms },
+      });
+      this.node.port.onmessage = (event) => this.onMicFrame(event.data);
+      const mute = this.ctx.createGain();
+      mute.gain.value = 0; // keeps the worklet running without playing the mic back
+      source.connect(this.node).connect(mute).connect(this.ctx.destination);
+    }
 
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const url = `${scheme}://${location.host}/ws/voice?session_id=${encodeURIComponent(this.info.session_id)}`;
-    this.ws = new WebSocket(url);
+    this.ws = new WebSocket(withCode(url));
     this.ws.binaryType = "arraybuffer";
     this.ws.onmessage = (event) =>
       typeof event.data === "string" ? this.onEvent(JSON.parse(event.data)) : this.onAudio(event.data);
@@ -126,9 +147,21 @@ class Call {
     else this.cleanup();
   }
 
+  sendText(text) {
+    if (this.isPlaying()) this.bargeIn(); // typing over the agent interrupts it, like talking does
+    this.send({ type: "user_text", text });
+  }
+
+  setMuted(muted) {
+    this.muted = muted;
+    this.loudMs = 0;
+    if (muted) showLevel(-100);
+  }
+
   // ---------------------------------------------------------------- mic
 
   onMicFrame({ pcm, db }) {
+    if (this.muted) return;
     showLevel(db);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(pcm);
     this.detectBargeIn(db, this.info.frame_ms);
@@ -207,6 +240,10 @@ class Call {
     return ms;
   }
 
+  remainingPlaybackS() {
+    return this.ctx && this.isPlaying() ? Math.max(0, this.cursor - this.ctx.currentTime) : 0;
+  }
+
   stopPlayback() {
     for (const s of this.sources) {
       s.src.onended = null;
@@ -232,7 +269,7 @@ class Call {
         break;
       case "transcript_final":
         ui.partial.textContent = "";
-        addUserTurn(event.turn_id, event.text);
+        addUserTurn(event.turn_id, event.text, event.source === "text");
         break;
       case "agent_text":
         addAgentText(event.turn_id, event.text);
@@ -252,7 +289,7 @@ class Call {
       case "call_ended":
         this.ended = true;
         setStatus("ended");
-        showBanner(END_REASONS[event.reason] || "Call ended.", "info", 6000);
+        showBanner(END_REASONS[event.reason] || "Call ended.", "info", 8000);
         break;
     }
   }
@@ -261,12 +298,21 @@ class Call {
     if (!this.ended) {
       setStatus("disconnected");
       showBanner("Disconnected from the server. The conversation so far has been saved.", "error");
+      this.cleanup();
+      return;
     }
-    this.cleanup();
+    // Let the goodbye finish playing before tearing the audio down.
+    this.stopMic();
+    if (call === this) call = null;
+    setCallControls(false);
+    const remaining = this.remainingPlaybackS();
+    if (remaining > 0) setTimeout(() => this.cleanup(), Math.min(remaining, 10) * 1000 + 100);
+    else this.cleanup();
   }
 
   stopMic() {
     if (this.mic) this.mic.getTracks().forEach((track) => track.stop());
+    if (this.node) this.node.port.onmessage = null;
   }
 
   cleanup() {
@@ -274,11 +320,9 @@ class Call {
     this.closed = true;
     this.stopMic();
     this.stopPlayback();
-    if (this.node) this.node.port.onmessage = null;
     if (this.ctx) this.ctx.close();
     showLevel(-100);
-    ui.start.disabled = false;
-    ui.end.disabled = true;
+    setCallControls(false);
     if (call === this) call = null;
   }
 }
@@ -289,24 +333,73 @@ let call = null;
 const agentBubbles = new Map();
 const latencies = [];
 
-ui.start.addEventListener("click", async () => {
+async function startCall({ textOnly = false } = {}) {
   if (call) return;
   hideBanner();
   ui.start.disabled = true;
-  call = new Call();
+  call = new Call({ textOnly });
   const ok = await call.start();
   if (!ok) {
     call = null;
     ui.start.disabled = false;
     return;
   }
-  ui.end.disabled = false;
-});
+  setCallControls(true, { textOnly });
+  if (textOnly) ui.message.focus();
+}
+
+ui.start.addEventListener("click", () => startCall());
+ui.textOnly.addEventListener("click", () => startCall({ textOnly: true }));
 
 ui.end.addEventListener("click", () => {
   ui.end.disabled = true;
   if (call) call.end();
 });
+
+ui.mute.addEventListener("click", () => toggleMute());
+
+ui.composer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = ui.message.value.trim();
+  if (!text || !call) return;
+  call.sendText(text);
+  ui.message.value = "";
+});
+
+document.addEventListener("keydown", (event) => {
+  const typing = event.target === ui.message;
+  if (event.key === "Escape" && call) {
+    event.preventDefault();
+    ui.end.click();
+  } else if (!typing && (event.key === "m" || event.key === "M") && call && !ui.mute.disabled) {
+    toggleMute();
+  } else if (!typing && event.key === "/" && call) {
+    event.preventDefault();
+    ui.message.focus();
+  }
+});
+
+function toggleMute() {
+  if (!call || call.textOnly) return;
+  const muted = !call.muted;
+  call.setMuted(muted);
+  ui.mute.textContent = muted ? "Unmute" : "Mute";
+  ui.mute.setAttribute("aria-pressed", String(muted));
+  ui.mute.classList.toggle("on", muted);
+}
+
+function setCallControls(active, { textOnly = false } = {}) {
+  ui.start.disabled = active;
+  ui.end.disabled = !active;
+  ui.mute.disabled = !active || textOnly;
+  ui.message.disabled = !active;
+  ui.send.disabled = !active;
+  if (!active) {
+    ui.mute.textContent = "Mute";
+    ui.mute.setAttribute("aria-pressed", "false");
+    ui.mute.classList.remove("on");
+  }
+}
 
 function callerTimezone() {
   try {
@@ -322,10 +415,11 @@ function setStatus(state) {
 }
 
 let bannerTimer = null;
-function showBanner(text, kind = "info", hideAfterMs = 0) {
+function showBanner(text, kind = "info", hideAfterMs = 0, { offerTextOnly = false } = {}) {
   clearTimeout(bannerTimer);
-  ui.banner.textContent = text;
+  ui.bannerText.textContent = text;
   ui.banner.dataset.kind = kind;
+  ui.textOnly.hidden = !offerTextOnly;
   ui.banner.hidden = false;
   if (hideAfterMs) bannerTimer = setTimeout(hideBanner, hideAfterMs);
 }
@@ -352,8 +446,10 @@ function bubble(role, text) {
   return el;
 }
 
-function addUserTurn(turnId, text) {
-  bubble("user", text).dataset.turn = turnId;
+function addUserTurn(turnId, text, typed) {
+  const el = bubble("user", text);
+  el.dataset.turn = turnId;
+  if (typed) el.classList.add("typed");
 }
 
 function agentBubble(turnId) {
@@ -384,13 +480,29 @@ function addToolCall(turnId, name, args) {
 }
 
 function addToolResult(turnId, name, isError, result) {
-  const chips = agentBubble(turnId).querySelectorAll(`.tool.pending[data-tool="${name}"]`);
-  const chip = chips[0];
+  const chip = agentBubble(turnId).querySelector(`.tool.pending[data-tool="${name}"]`);
   if (!chip) return;
   chip.classList.remove("pending");
   chip.classList.add(isError ? "failed" : "ok");
-  const summary = isError ? result.error : result.spoken || result.status || JSON.stringify(result);
-  chip.textContent += ` -> ${summary}`;
+  chip.textContent += ` -> ${summarizeResult(name, isError, result)}`;
+}
+
+function summarizeResult(name, isError, result) {
+  if (isError) return result.error;
+  switch (name) {
+    case "get_current_time":
+      return result.spoken;
+    case "get_order_status":
+      return result.status;
+    case "calculate":
+      return String(result.result);
+    case "get_weather":
+      return `${result.temperature}° ${result.conditions}, ${result.location}`;
+    case "end_call":
+      return "hanging up after the goodbye";
+    default:
+      return JSON.stringify(result);
+  }
 }
 
 function markInterrupted(turnId) {
@@ -399,18 +511,20 @@ function markInterrupted(turnId) {
 }
 
 function recordMetrics(m) {
-  if (m.total_ms == null) return;
-  latencies.push(m.total_ms);
   const stages = [
     ["vad", m.vad_end_ms],
     ["stt", m.stt_final_ms],
     ["llm", m.llm_first_token_ms],
     ["tts", m.tts_first_audio_ms],
   ];
-  const scale = Math.max(m.total_ms, BUDGET_MS) * 1.1;
+  const measured = stages.filter(([, ms]) => ms != null);
+  if (!measured.length) return;
+  // Typed turns have no speech stages, so their total is LLM + TTS.
+  const total = m.total_ms ?? measured.reduce((sum, [, ms]) => sum + ms, 0);
+  if (m.total_ms != null) latencies.push(m.total_ms);
+  const scale = Math.max(total, BUDGET_MS) * 1.1;
   ui.bar.querySelectorAll(".seg").forEach((el) => el.remove());
-  for (const [name, ms] of stages) {
-    if (ms == null) continue;
+  for (const [name, ms] of measured) {
     const seg = document.createElement("span");
     seg.className = `seg ${name}`;
     seg.style.width = `${(ms / scale) * 100}%`;
@@ -418,11 +532,25 @@ function recordMetrics(m) {
     ui.bar.append(seg);
   }
   ui.bar.querySelector(".budget").style.left = `${(BUDGET_MS / scale) * 100}%`;
-  const sorted = [...latencies].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  const parts = stages.filter(([, ms]) => ms != null).map(([n, ms]) => `${n.toUpperCase()} ${Math.round(ms)}`);
-  ui.stats.textContent =
-    `Turn ${m.turn_id}: ${parts.join(" + ")} = ${Math.round(m.total_ms)} ms. ` +
-    `Median over ${latencies.length} turn${latencies.length === 1 ? "" : "s"}: ${Math.round(median)} ms.`;
+  const parts = measured.map(([n, ms]) => `${n.toUpperCase()} ${Math.round(ms)}`);
+  let text = `Turn ${m.turn_id}: ${parts.join(" + ")} = ${Math.round(total)} ms`;
+  text += m.total_ms == null ? " (typed, no speech stages)." : ".";
+  if (latencies.length) {
+    const sorted = [...latencies].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    text += ` Median over ${latencies.length} spoken turn${latencies.length === 1 ? "" : "s"}: ${Math.round(median)} ms.`;
+  }
+  ui.stats.textContent = text;
 }
+
+async function showDemoNotice() {
+  try {
+    const res = await fetch("/healthz");
+    if (res.ok && (await res.json()).demo_mode) ui.demo.hidden = false;
+  } catch {
+    // the notice is informational only
+  }
+}
+
+showDemoNotice();
