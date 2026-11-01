@@ -26,7 +26,7 @@ conversation until you or it hangs up.
 **Bonus features**
 
 - **Tools.** Current time (in the caller's own time zone), order status (mock service), live
-  weather anywhere (Open-Meteo, no key needed), and an exact calculator for totals, tips and
+  weather anywhere (Open-Meteo with a wttr.in fallback, no keys needed), and an exact calculator for totals, tips and
   percentages.
 - **The agent hangs up.** Say "thanks, that's all" and it says goodbye, then ends the call
   once the goodbye has played. Interrupting the goodbye keeps the call open.
@@ -151,7 +151,7 @@ All settings are environment variables (or `.env`). The main ones:
 | `SILENCE_TIMEOUT_S` | `120` | end the call after this much silence |
 | `MAX_CALL_DURATION_S` | `600` | hard call limit |
 | `STT_TIMEOUT_S` / `LLM_TIMEOUT_S` / `TTS_TIMEOUT_S` / `TOOL_TIMEOUT_S` | `4` / `10` / `5` / `8` | per-stage timeouts |
-| `ENABLE_WEATHER` | `true` | the `get_weather` tool (calls Open-Meteo) |
+| `ENABLE_WEATHER` | `true` | the `get_weather` tool (Open-Meteo, falling back to wttr.in) |
 | `ALLOW_AGENT_HANGUP` | `true` | the `end_call` tool |
 | `DEFAULT_TIMEZONE` | server local | time zone for `get_current_time` when the caller's isn't known |
 | `ACCESS_CODE` | | when set, the API and the socket require it (`X-Access-Code` header or `code` query) |

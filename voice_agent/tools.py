@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -290,6 +291,8 @@ CALCULATOR_TOOL = Tool(
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+WTTR_URL = "https://wttr.in/"
+CURRENT_FIELDS = "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m"
 WEATHER_CODES = {
     0: "clear sky",
     1: "mainly clear",
@@ -336,56 +339,105 @@ async def _get_json(http: httpx.AsyncClient, url: str, params: dict[str, Any]) -
     raise AssertionError("unreachable")
 
 
+def _describe_http_error(exc: httpx.HTTPError) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}: {exc.response.text[:200]}".replace("\n", " ")
+    return repr(exc)
+
+
+def _place_name(*parts: str | None) -> str:
+    return ", ".join(dict.fromkeys(p.strip() for p in parts if p and p.strip()))
+
+
+def _from_open_meteo(place: dict[str, Any], data: dict[str, Any], units: str) -> dict[str, Any]:
+    current, daily = data["current"], data.get("daily", {})
+    return {
+        "location": _place_name(place.get("name"), place.get("admin1"), place.get("country")),
+        "conditions": WEATHER_CODES.get(current.get("weather_code"), "unknown conditions"),
+        "temperature": round(current["temperature_2m"]),
+        "feels_like": round(current["apparent_temperature"]),
+        "humidity_percent": current.get("relative_humidity_2m"),
+        "wind": f"{round(current['wind_speed_10m'])} {'km/h' if units == 'celsius' else 'mph'}",
+        "today_high": round(daily["temperature_2m_max"][0]) if daily.get("temperature_2m_max") else None,
+        "today_low": round(daily["temperature_2m_min"][0]) if daily.get("temperature_2m_min") else None,
+        "units": units,
+        "source": "open-meteo",
+    }
+
+
+def _from_wttr(data: dict[str, Any], place: dict[str, Any] | None, units: str) -> dict[str, Any]:
+    current = data["current_condition"][0]
+    today = (data.get("weather") or [{}])[0]
+    c = units == "celsius"
+    if place is not None:
+        name = _place_name(place.get("name"), place.get("admin1"), place.get("country"))
+    else:
+        area = (data.get("nearest_area") or [{}])[0]
+        name = _place_name(*((area.get(key) or [{}])[0].get("value") for key in ("areaName", "region", "country")))
+    high, low = today.get("maxtempC" if c else "maxtempF"), today.get("mintempC" if c else "mintempF")
+    return {
+        "location": name,
+        "conditions": (current.get("weatherDesc") or [{}])[0].get("value", "unknown conditions").strip().lower(),
+        "temperature": int(current["temp_C" if c else "temp_F"]),
+        "feels_like": int(current["FeelsLikeC" if c else "FeelsLikeF"]),
+        "humidity_percent": int(current["humidity"]) if current.get("humidity") else None,
+        "wind": f"{current['windspeedKmph']} km/h" if c else f"{current['windspeedMiles']} mph",
+        "today_high": int(high) if high else None,
+        "today_low": int(low) if low else None,
+        "units": units,
+        "source": "wttr.in",
+    }
+
+
 def make_get_weather(client: httpx.AsyncClient | None = None) -> Tool:
-    """Current weather from Open-Meteo (free, no API key)."""
+    """Current weather from Open-Meteo, falling back to wttr.in (both free, no API key).
+
+    Open-Meteo's free tier limits requests per IP address, and hosting platforms
+    share outgoing IPs between many apps, so a deployment can find the shared
+    quota used up (HTTP 429). wttr.in is the fallback for that and other failures.
+    """
 
     async def get_weather(location: str, units: str = "celsius") -> dict[str, Any]:
         if units not in ("celsius", "fahrenheit"):
             raise ToolError("units must be 'celsius' or 'fahrenheit'.")
         http = client or httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0))
+        place: dict[str, Any] | None = None
         try:
-            geo = await _get_json(http, GEOCODE_URL, {"name": location, "count": 1, "language": "en", "format": "json"})
-            places = geo.get("results") or []
-            if not places:
-                raise ToolError(f"I couldn't find a place called {location!r}.")
-            place = places[0]
-            data = await _get_json(
-                http,
-                FORECAST_URL,
-                {
-                    "latitude": place["latitude"],
-                    "longitude": place["longitude"],
-                    "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
-                    "daily": "temperature_2m_max,temperature_2m_min",
-                    "timezone": "auto",
-                    "forecast_days": 1,
-                    "temperature_unit": units,
-                    "wind_speed_unit": "kmh" if units == "celsius" else "mph",
-                },
-            )
-        except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:200].replace("\n", " ")
-            log.warning("weather service answered HTTP %s: %s", exc.response.status_code, body)
-            raise ToolError("The weather service isn't available right now.") from exc
-        except httpx.HTTPError as exc:
-            log.warning("weather service unreachable: %r", exc)
-            raise ToolError("The weather service isn't reachable right now.") from exc
+            try:
+                geo = await _get_json(
+                    http, GEOCODE_URL, {"name": location, "count": 1, "language": "en", "format": "json"}
+                )
+                places = geo.get("results") or []
+                if not places:
+                    raise ToolError(f"I couldn't find a place called {location!r}.")
+                place = places[0]
+                data = await _get_json(
+                    http,
+                    FORECAST_URL,
+                    {
+                        "latitude": place["latitude"],
+                        "longitude": place["longitude"],
+                        "current": CURRENT_FIELDS,
+                        "daily": "temperature_2m_max,temperature_2m_min",
+                        "timezone": "auto",
+                        "forecast_days": 1,
+                        "temperature_unit": units,
+                        "wind_speed_unit": "kmh" if units == "celsius" else "mph",
+                    },
+                )
+                return _from_open_meteo(place, data, units)
+            except httpx.HTTPError as exc:
+                log.warning("Open-Meteo failed (%s); trying wttr.in", _describe_http_error(exc))
+            query = f"{place['latitude']:.4f},{place['longitude']:.4f}" if place else location
+            try:
+                data = await _get_json(http, WTTR_URL + quote(query, safe=","), {"format": "j1"})
+            except httpx.HTTPError as exc:
+                log.warning("wttr.in failed too (%s)", _describe_http_error(exc))
+                raise ToolError("The weather service isn't available right now.") from exc
+            return _from_wttr(data, place, units)
         finally:
             if client is None:
                 await http.aclose()
-        current, daily = data["current"], data.get("daily", {})
-        name = ", ".join(dict.fromkeys(p for p in (place.get("name"), place.get("admin1"), place.get("country")) if p))
-        return {
-            "location": name,
-            "conditions": WEATHER_CODES.get(current.get("weather_code"), "unknown conditions"),
-            "temperature": round(current["temperature_2m"]),
-            "feels_like": round(current["apparent_temperature"]),
-            "humidity_percent": current.get("relative_humidity_2m"),
-            "wind": f"{round(current['wind_speed_10m'])} {'km/h' if units == 'celsius' else 'mph'}",
-            "today_high": round(daily["temperature_2m_max"][0]) if daily.get("temperature_2m_max") else None,
-            "today_low": round(daily["temperature_2m_min"][0]) if daily.get("temperature_2m_min") else None,
-            "units": units,
-        }
 
     return Tool(
         name="get_weather",

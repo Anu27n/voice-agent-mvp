@@ -357,7 +357,7 @@ configurable.
 | `get_current_time` | time in any IANA zone | defaults to the caller's zone sent at session start |
 | `get_order_status` | mock order service | unknown IDs return an error the model explains |
 | `calculate` | exact arithmetic, percentages, `sqrt`/`abs`/`round` | evaluated from the AST; no names, attributes or arbitrary calls; size limits on powers and results |
-| `get_weather` | current conditions and today's high/low | Open-Meteo geocoding + forecast, no API key; `ENABLE_WEATHER=false` removes it |
+| `get_weather` | current conditions and today's high/low | Open-Meteo geocoding + forecast, no API key; falls back to wttr.in when Open-Meteo errors (its free quota is per IP, which shared hosting IPs can exhaust); `ENABLE_WEATHER=false` removes it |
 | `end_call` | hangs up after the goodbye | sets a per-call flag; when the reply has finished playing the call ends with `agent_ended`; barging in clears it |
 
 Each call gets its own tool set, so the time default and the hang-up flag

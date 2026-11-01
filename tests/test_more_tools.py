@@ -10,6 +10,7 @@ from voice_agent.providers.mock import _arithmetic
 from voice_agent.tools import (
     FORECAST_URL,
     GEOCODE_URL,
+    WTTR_URL,
     ToolError,
     ToolExecutor,
     calculate,
@@ -56,15 +57,49 @@ def test_calculate_rejects_unsafe_or_invalid_input(expression, message):
         calculate(expression)
 
 
-def weather_client(geocode: dict, forecast: dict | None = None, status: int = 200) -> httpx.AsyncClient:
+def weather_client(
+    geocode: dict,
+    forecast: dict | None = None,
+    status: int = 200,
+    forecast_status: int = 200,
+    wttr: dict | None = None,
+    seen: list | None = None,
+) -> httpx.AsyncClient:
+    """Fake Open-Meteo (geocoding + forecast) and wttr.in. wttr.in answers 503 unless given a body."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url).startswith(GEOCODE_URL):
+        url = str(request.url)
+        if seen is not None:
+            seen.append(url)
+        if url.startswith(GEOCODE_URL):
             return httpx.Response(status, json=geocode)
-        assert str(request.url).startswith(FORECAST_URL)
+        if url.startswith(WTTR_URL):
+            return httpx.Response(200, json=wttr) if wttr else httpx.Response(503, text="unavailable")
+        assert url.startswith(FORECAST_URL)
         assert request.url.params["temperature_unit"] in ("celsius", "fahrenheit")
-        return httpx.Response(200, json=forecast)
+        return httpx.Response(forecast_status, json=forecast if forecast_status == 200 else {"reason": "limit"})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+WTTR = {
+    "current_condition": [
+        {
+            "temp_C": "22",
+            "temp_F": "71",
+            "FeelsLikeC": "15",
+            "FeelsLikeF": "60",
+            "humidity": "61",
+            "windspeedKmph": "40",
+            "windspeedMiles": "25",
+            "weatherDesc": [{"value": "Clear "}],
+        }
+    ],
+    "weather": [{"maxtempC": "24", "mintempC": "18", "maxtempF": "74", "mintempF": "65"}],
+    "nearest_area": [
+        {"areaName": [{"value": "Shinjuku"}], "region": [{"value": "Tokyo"}], "country": [{"value": "Japan"}]}
+    ],
+}
 
 
 PARIS = {
@@ -96,7 +131,32 @@ async def test_weather_reports_current_conditions():
         "today_high": 14,
         "today_low": 8,
         "units": "celsius",
+        "source": "open-meteo",
     }
+
+
+async def test_weather_falls_back_to_wttr_when_open_meteo_is_rate_limited():
+    # Shared cloud IPs can exhaust Open-Meteo's free daily quota (HTTP 429).
+    seen = []
+    client = weather_client(PARIS, forecast_status=429, wttr=WTTR, seen=seen)
+    result = await ToolExecutor([make_get_weather(client)]).run(ToolCall("1", "get_weather", {"location": "Paris"}))
+    assert not result.is_error
+    data = json.loads(result.content)
+    assert data["source"] == "wttr.in"
+    assert data["location"] == "Paris, Ile-de-France, France"  # the geocoded name, not wttr's guess
+    assert (data["temperature"], data["conditions"], data["wind"]) == (22, "clear", "40 km/h")
+    assert (data["today_high"], data["today_low"]) == (24, 18)
+    assert seen[-1].startswith(WTTR_URL + "48.8500,2.3500")  # queried by coordinates
+
+
+async def test_weather_falls_back_by_name_when_geocoding_fails():
+    client = weather_client({}, status=429, wttr=WTTR)
+    result = await ToolExecutor([make_get_weather(client)]).run(
+        ToolCall("1", "get_weather", {"location": "Tokyo", "units": "fahrenheit"})
+    )
+    data = json.loads(result.content)
+    assert data["location"] == "Shinjuku, Tokyo, Japan"
+    assert (data["temperature"], data["feels_like"], data["wind"], data["units"]) == (71, 60, "25 mph", "fahrenheit")
 
 
 async def test_weather_unknown_place_and_outage_are_tool_errors():
@@ -171,5 +231,6 @@ async def test_weather_rate_limit_is_reported_not_retried(caplog):
     tool = make_get_weather(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     result = await ToolExecutor([tool]).run(ToolCall("1", "get_weather", {"location": "Paris"}))
     assert result.is_error and "isn't available" in result.content
-    assert len(calls) == 1
+    # One Open-Meteo call, one wttr.in fallback, and no retries of an HTTP error status.
+    assert [str(r.url).startswith(GEOCODE_URL) for r in calls] == [True, False]
     assert "HTTP 429" in caplog.text
