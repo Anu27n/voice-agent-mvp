@@ -322,23 +322,37 @@ WEATHER_CODES = {
 }
 
 
+async def _get_json(http: httpx.AsyncClient, url: str, params: dict[str, Any]) -> dict[str, Any]:
+    """GET a JSON document, retrying once on a network error (not on an HTTP error status)."""
+    for attempt in range(2):
+        try:
+            response = await http.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.TransportError as exc:
+            if attempt == 1:
+                raise
+            log.warning("weather request to %s failed (%r); retrying", url, exc)
+    raise AssertionError("unreachable")
+
+
 def make_get_weather(client: httpx.AsyncClient | None = None) -> Tool:
     """Current weather from Open-Meteo (free, no API key)."""
 
     async def get_weather(location: str, units: str = "celsius") -> dict[str, Any]:
         if units not in ("celsius", "fahrenheit"):
             raise ToolError("units must be 'celsius' or 'fahrenheit'.")
-        http = client or httpx.AsyncClient(timeout=4.0)
+        http = client or httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0))
         try:
-            geo = await http.get(GEOCODE_URL, params={"name": location, "count": 1, "language": "en", "format": "json"})
-            geo.raise_for_status()
-            places = geo.json().get("results") or []
+            geo = await _get_json(http, GEOCODE_URL, {"name": location, "count": 1, "language": "en", "format": "json"})
+            places = geo.get("results") or []
             if not places:
                 raise ToolError(f"I couldn't find a place called {location!r}.")
             place = places[0]
-            forecast = await http.get(
+            data = await _get_json(
+                http,
                 FORECAST_URL,
-                params={
+                {
                     "latitude": place["latitude"],
                     "longitude": place["longitude"],
                     "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
@@ -349,9 +363,12 @@ def make_get_weather(client: httpx.AsyncClient | None = None) -> Tool:
                     "wind_speed_unit": "kmh" if units == "celsius" else "mph",
                 },
             )
-            forecast.raise_for_status()
-            data = forecast.json()
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:200].replace("\n", " ")
+            log.warning("weather service answered HTTP %s: %s", exc.response.status_code, body)
+            raise ToolError("The weather service isn't available right now.") from exc
         except httpx.HTTPError as exc:
+            log.warning("weather service unreachable: %r", exc)
             raise ToolError("The weather service isn't reachable right now.") from exc
         finally:
             if client is None:

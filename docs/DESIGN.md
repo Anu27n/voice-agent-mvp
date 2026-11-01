@@ -347,7 +347,7 @@ client's 60 ms jitter buffer.
 | Too many calls / wrong access code | `429` / `401` with a clear message on the page | `main.py`, `web/common.js` |
 
 Timeouts: STT 4 s (end of speech to transcript), LLM 10 s (to first token and
-between tokens), TTS 5 s (to first chunk and between chunks), tools 5 s. All are
+between tokens), TTS 5 s (to first chunk and between chunks), tools 8 s. All are
 configurable.
 
 ## 11a. Tools, hanging up, typed turns

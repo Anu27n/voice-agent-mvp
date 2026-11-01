@@ -150,7 +150,7 @@ All settings are environment variables (or `.env`). The main ones:
 | `BARGE_IN_MIN_MS` | `200` | speech that cancels a reply still being generated |
 | `SILENCE_TIMEOUT_S` | `120` | end the call after this much silence |
 | `MAX_CALL_DURATION_S` | `600` | hard call limit |
-| `STT_TIMEOUT_S` / `LLM_TIMEOUT_S` / `TTS_TIMEOUT_S` / `TOOL_TIMEOUT_S` | `4` / `10` / `5` / `5` | per-stage timeouts |
+| `STT_TIMEOUT_S` / `LLM_TIMEOUT_S` / `TTS_TIMEOUT_S` / `TOOL_TIMEOUT_S` | `4` / `10` / `5` / `8` | per-stage timeouts |
 | `ENABLE_WEATHER` | `true` | the `get_weather` tool (calls Open-Meteo) |
 | `ALLOW_AGENT_HANGUP` | `true` | the `end_call` tool |
 | `DEFAULT_TIMEZONE` | server local | time zone for `get_current_time` when the caller's isn't known |

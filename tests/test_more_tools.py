@@ -108,7 +108,7 @@ async def test_weather_unknown_place_and_outage_are_tool_errors():
     outage = await ToolExecutor([make_get_weather(weather_client({}, status=503))]).run(
         ToolCall("2", "get_weather", {"location": "Paris"})
     )
-    assert outage.is_error and "isn't reachable" in outage.content
+    assert outage.is_error and "isn't available" in outage.content
 
     bad_units = await ToolExecutor([make_get_weather(weather_client(PARIS, FORECAST))]).run(
         ToolCall("3", "get_weather", {"location": "Paris", "units": "kelvin"})
@@ -143,3 +143,33 @@ def test_default_tool_set():
 )
 def test_mock_llm_spots_arithmetic(spoken, expression):
     assert _arithmetic(spoken) == expression
+
+
+async def test_weather_retries_a_network_blip_once():
+    attempts = {"geo": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith(GEOCODE_URL):
+            attempts["geo"] += 1
+            if attempts["geo"] == 1:
+                raise httpx.ConnectError("connection reset")
+            return httpx.Response(200, json=PARIS)
+        return httpx.Response(200, json=FORECAST)
+
+    tool = make_get_weather(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    result = await ToolExecutor([tool]).run(ToolCall("1", "get_weather", {"location": "Paris"}))
+    assert not result.is_error and attempts["geo"] == 2
+
+
+async def test_weather_rate_limit_is_reported_not_retried(caplog):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, text="Too many requests")
+
+    tool = make_get_weather(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    result = await ToolExecutor([tool]).run(ToolCall("1", "get_weather", {"location": "Paris"}))
+    assert result.is_error and "isn't available" in result.content
+    assert len(calls) == 1
+    assert "HTTP 429" in caplog.text

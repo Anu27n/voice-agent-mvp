@@ -78,7 +78,10 @@ def create_app(
     tts = tts or build_tts(settings)
     store = store or Store(settings.db_path)
     manager = SessionManager(store, settings)
-    weather_http = httpx.AsyncClient(timeout=4.0)
+    weather_http = httpx.AsyncClient(
+        timeout=httpx.Timeout(5.0, connect=3.0),
+        headers={"User-Agent": "voice-agent-mvp/0.2 (+https://github.com/Anu27n/voice-agent-mvp)"},
+    )
 
     def make_agent(session: Session) -> Agent:
         # Per call: the time tool defaults to the caller's zone, and end_call

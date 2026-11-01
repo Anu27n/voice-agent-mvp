@@ -67,7 +67,7 @@ class Settings:
     stt_timeout_s: float = 4.0  # from end of speech to final transcript
     llm_timeout_s: float = 10.0  # to first token, and between tokens
     tts_timeout_s: float = 5.0  # to first audio chunk, and between chunks
-    tool_timeout_s: float = 5.0
+    tool_timeout_s: float = 8.0  # weather does two HTTP calls, with one retry each
     max_tool_rounds: int = 3
 
     # Anthropic (LLM).
