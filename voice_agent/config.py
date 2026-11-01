@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,7 +22,8 @@ Everything you write is converted to speech, so:
 - When you need a tool, you may say one brief sentence first, such as "Let me check that."
 - If a tool returns an error, explain the problem simply and suggest what the caller can do next.
 - If the caller's words seem garbled or cut off, ask them to repeat instead of guessing.
-You can look up the current time in any time zone and the status of a customer's order."""
+- Use your tools for the time, orders, weather and arithmetic instead of guessing.
+- When the caller says goodbye or wants to hang up, say a brief goodbye and end the call."""
 
 
 class ConfigError(Exception):
@@ -32,10 +33,11 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class Settings:
     # Which adapter to use for each stage. Built-in names: see providers/registry.py.
-    # A dotted path ("package.module:ClassName") loads a custom adapter.
-    stt_provider: str = "mock"
-    llm_provider: str = "mock"
-    tts_provider: str = "mock"
+    # A dotted path ("package.module:ClassName") loads a custom adapter. "auto"
+    # picks the real provider whose API key is set, and the mock otherwise.
+    stt_provider: str = "auto"
+    llm_provider: str = "auto"
+    tts_provider: str = "auto"
 
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     prompt_version: str = ""  # derived from the prompt text when left empty
@@ -95,11 +97,18 @@ class Settings:
 
     # Tools.
     default_timezone: str = ""  # empty -> the server's local time zone
+    enable_weather: bool = True  # live weather via Open-Meteo (no API key needed)
+    allow_agent_hangup: bool = True  # the agent may end the call when the caller says goodbye
+
+    # Public deployments.
+    access_code: str | None = None  # when set, every API call and the socket must present it
+    max_active_calls: int = 10  # POST /sessions answers 429 beyond this
 
     # Storage and server.
     db_path: str = "data/voice_agent.db"
     host: str = "127.0.0.1"
     port: int = 8000
+    web_dir: str = ""  # directory of the web client; empty -> ./web next to the package
 
     def __post_init__(self) -> None:
         if not self.prompt_version:
@@ -109,6 +118,27 @@ class Settings:
     @property
     def frame_bytes(self) -> int:
         return self.input_sample_rate * self.frame_ms // 1000 * 2
+
+    @property
+    def demo_mode(self) -> bool:
+        """True when any stage runs on a mock provider."""
+        resolved = self.resolve_auto()
+        return "mock" in (resolved.stt_provider, resolved.llm_provider, resolved.tts_provider)
+
+    def resolve_auto(self) -> "Settings":
+        """Replace "auto" provider names with the provider whose key is configured."""
+        stt = self.stt_provider
+        llm = self.llm_provider
+        tts = self.tts_provider
+        if stt == "auto":
+            stt = "deepgram" if self.deepgram_api_key else "mock"
+        if llm == "auto":
+            llm = "anthropic" if self.anthropic_api_key else "mock"
+        if tts == "auto":
+            tts = "deepgram" if self.deepgram_api_key else ("elevenlabs" if self.elevenlabs_api_key else "mock")
+        if (stt, llm, tts) == (self.stt_provider, self.llm_provider, self.tts_provider):
+            return self
+        return replace(self, stt_provider=stt, llm_provider=llm, tts_provider=tts)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, *, dotenv: bool = True) -> "Settings":
@@ -133,9 +163,11 @@ class Settings:
 
     def public_config(self) -> dict[str, Any]:
         """The configuration stored with each session (no secrets)."""
+        resolved = self.resolve_auto()
         return {
-            "providers": {"stt": self.stt_provider, "llm": self.llm_provider, "tts": self.tts_provider},
-            "llm_model": self.llm_model if self.llm_provider == "anthropic" else None,
+            "providers": {"stt": resolved.stt_provider, "llm": resolved.llm_provider, "tts": resolved.tts_provider},
+            "llm_model": self.llm_model if resolved.llm_provider == "anthropic" else None,
+            "tools": {"weather": self.enable_weather, "agent_hangup": self.allow_agent_hangup},
             "prompt_version": self.prompt_version,
             "audio": {
                 "input_sample_rate": self.input_sample_rate,

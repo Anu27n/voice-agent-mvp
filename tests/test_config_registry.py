@@ -40,16 +40,42 @@ def test_prompt_version_follows_the_prompt(tmp_path):
 
 
 def test_public_config_has_no_secrets():
-    config = fast_settings(anthropic_api_key="sk-secret", deepgram_api_key="dg-secret").public_config()
+    config = fast_settings(
+        anthropic_api_key="sk-secret", deepgram_api_key="dg-secret", access_code="secret-code"
+    ).public_config()
     assert "secret" not in repr(config)
-    assert config["providers"] == {"stt": "mock", "llm": "mock", "tts": "mock"}
+    # "auto" is stored as the provider it resolved to.
+    assert config["providers"] == {"stt": "deepgram", "llm": "anthropic", "tts": "deepgram"}
+    assert config["llm_model"] == "claude-opus-5-5"
 
 
 def test_builds_mock_providers_by_default():
     settings = fast_settings()
+    assert settings.stt_provider == "auto" and settings.demo_mode
     assert isinstance(build_stt(settings), MockSTT)
     assert isinstance(build_llm(settings), MockLLM)
     assert isinstance(build_tts(settings), MockTTS)
+
+
+@pytest.mark.parametrize(
+    "keys, expected",
+    [
+        ({}, ("mock", "mock", "mock")),
+        ({"anthropic_api_key": "a"}, ("mock", "anthropic", "mock")),
+        ({"deepgram_api_key": "d"}, ("deepgram", "mock", "deepgram")),
+        ({"elevenlabs_api_key": "e"}, ("mock", "mock", "elevenlabs")),
+        ({"deepgram_api_key": "d", "anthropic_api_key": "a"}, ("deepgram", "anthropic", "deepgram")),
+    ],
+)
+def test_auto_picks_the_provider_whose_key_is_set(keys, expected):
+    resolved = fast_settings(**keys).resolve_auto()
+    assert (resolved.stt_provider, resolved.llm_provider, resolved.tts_provider) == expected
+    assert resolved.demo_mode == ("mock" in expected)
+
+
+def test_explicit_provider_names_are_kept():
+    resolved = fast_settings(stt_provider="mock", deepgram_api_key="d").resolve_auto()
+    assert resolved.stt_provider == "mock" and resolved.tts_provider == "deepgram"
 
 
 def test_swapping_tts_is_configuration_only():

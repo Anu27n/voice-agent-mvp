@@ -337,3 +337,198 @@ h2 {
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- header navigation, demo notice ------------------------------------ */
+
+.top-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.nav {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.nav:hover {
+  text-decoration: underline;
+}
+
+.demo {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px dashed var(--warn);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.demo strong {
+  color: var(--warn);
+}
+
+/* --- buttons ------------------------------------------------------------ */
+
+.btn.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn.ghost.on {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #fff;
+}
+
+.btn.small {
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.btn:not(.primary):not(.danger):not(.ghost) {
+  background: var(--agent-bg);
+  color: var(--text);
+}
+
+.link {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* --- composer and hints ------------------------------------------------- */
+
+.composer {
+  display: flex;
+  gap: 8px;
+}
+
+.composer input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.composer input:disabled {
+  opacity: 0.6;
+}
+
+.hint {
+  margin: -8px 2px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  font: 11px ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.empty ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-style: italic;
+}
+
+.turn.user.typed .text::after {
+  content: " (typed)";
+  opacity: 0.75;
+  font-size: 12px;
+}
+
+/* --- history page ------------------------------------------------------- */
+
+.app.wide {
+  max-width: 960px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.links {
+  display: flex;
+  gap: 14px;
+  font-size: 13px;
+}
+
+.links a {
+  color: var(--accent);
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+table.data th,
+table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+table.data th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+table.data td.num,
+table.data th:not(:first-child) {
+  text-align: right;
+}
+
+table.data td.muted {
+  color: var(--muted);
+  white-space: normal;
+  text-align: left;
+}
+
+table.clickable tbody tr {
+  cursor: pointer;
+}
+
+table.clickable tbody tr:hover,
+table.clickable tbody tr:focus {
+  background: var(--agent-bg);
+  outline: none;
+}
+
+.transcript.compact {
+  min-height: 0;
+  max-height: 420px;
+}

@@ -5,10 +5,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 from conftest import fast_settings, silence, speech, wait_for
 from voice_agent.pipeline import FALLBACK_LINE, MAX_DURATION_GOODBYE, SILENCE_GOODBYE
-from voice_agent.providers.base import LLMProvider, TTSError, TTSProvider
+from voice_agent.providers.base import ChatMessage, LLMProvider, LLMTurnEnd, TextDelta, TTSError, TTSProvider
+
+
+class MarkdownLLM(LLMProvider):
+    """A model that ignores the 'plain spoken language' instruction."""
+
+    TEXT = "**Sure!** Here are your options:\n- Express shipping 🚚\n- Standard shipping\n"
+
+    async def stream(self, *, system, messages, tools):
+        for piece in re.findall(r"\S+\s*", self.TEXT):
+            yield TextDelta(piece)
+        yield LLMTurnEnd(ChatMessage("assistant", text=self.TEXT), "end_turn")
+
+
+async def test_markdown_is_cleaned_before_it_is_spoken(harness_factory):
+    h = await harness_factory(llm=MarkdownLLM())
+    await h.say()
+    await h.wait_listening_after(1)
+    await h.flush()
+    expected = ["Sure!", "Here are your options:", "Express shipping", "Standard shipping"]
+    assert [e["text"] for e in h.transport.of("agent_text")] == expected
+    assert h.tts.spoken == expected
 
 
 async def test_single_turn_happy_path(harness_factory):
@@ -20,7 +42,7 @@ async def test_single_turn_happy_path(harness_factory):
     assert h.transport.states()[:4] == ["listening", "thinking", "speaking", "listening"]
     assert h.transport.of("transcript_partial"), "live captions expected"
     final = h.transport.of("transcript_final")
-    assert final == [{"type": "transcript_final", "text": "Hi there, my name is Sam.", "turn_id": 1}]
+    assert final == [{"type": "transcript_final", "text": "Hi there, my name is Sam.", "turn_id": 1, "source": "voice"}]
     agent_text = " ".join(e["text"] for e in h.transport.of("agent_text"))
     assert agent_text.startswith("You said: Hi there, my name is Sam")
     assert h.transport.audio and all(turn == 1 for turn, _ in h.transport.audio)
@@ -261,3 +283,66 @@ async def test_interrupt_with_nothing_playing_is_acknowledged(harness_factory):
     await h.pipeline.on_message(json.dumps({"type": "interrupt", "turn_id": 7}))
     await h.flush()
     assert h.transport.states() == ["listening", "listening"]
+
+
+async def test_typed_message_is_a_turn_without_speech_stages(harness_factory):
+    h = await harness_factory()
+    await h.pipeline.on_message(json.dumps({"type": "user_text", "text": "  What is 12 times 7?  "}))
+    await h.wait_listening_after(1)
+    await h.flush()
+
+    assert h.transport.of("transcript_final") == [
+        {"type": "transcript_final", "text": "What is 12 times 7?", "turn_id": 1, "source": "text"}
+    ]
+    assert h.stt.opened == 0  # no speech recognition involved
+    assert " ".join(e["text"] for e in h.transport.of("agent_text")) == "Let me work that out. That comes to 84."
+    metrics = h.transport.of("metrics")[0]
+    assert metrics["vad_end_ms"] is None and metrics["stt_final_ms"] is None and metrics["total_ms"] is None
+    assert metrics["llm_first_token_ms"] is not None and metrics["tts_first_audio_ms"] is not None
+
+
+async def test_typing_while_the_agent_speaks_interrupts_it(harness_factory):
+    h = await harness_factory(fast_settings(mock_tts_ms_per_char=60.0))
+    await h.say()
+    await wait_for(lambda: h.session.state.value == "speaking", message="agent speaking")
+    await h.pipeline.on_message(json.dumps({"type": "user_text", "text": "Do you remember my name?"}))
+    await wait_for(lambda: len(h.transport.of("transcript_final")) == 2, message="typed turn")
+    saved = await h.store.get_session(h.session.id)
+    first_reply = next(t for t in saved["transcript"] if t["turn_id"] == 1 and t["role"] == "agent")
+    assert first_reply["interrupted"] is True
+
+
+async def test_empty_typed_message_is_rejected(harness_factory):
+    h = await harness_factory()
+    await h.pipeline.on_message(json.dumps({"type": "user_text", "text": "   "}))
+    await h.flush()
+    assert h.transport.of("error")[0]["code"] == "bad_message"
+    assert h.llm.requests == []
+
+
+async def test_agent_hangs_up_after_its_goodbye_has_played(harness_factory):
+    h = await harness_factory(fast_settings(mock_stt_script=("Thanks, that's all for today.",)))
+    await h.say()
+    await asyncio.wait_for(h.pipeline.ended.wait(), 5)
+    await h.flush()
+
+    assert [e["name"] for e in h.transport.of("tool_call")] == ["end_call"]
+    assert " ".join(e["text"] for e in h.transport.of("agent_text")) == "You're welcome. Goodbye!"
+    assert h.transport.events[-1] == {"type": "call_ended", "reason": "agent_ended"}
+    # The goodbye audio went out before the call ended.
+    assert h.transport.audio and all(turn == 1 for turn, _ in h.transport.audio)
+    saved = await h.store.get_session(h.session.id)
+    assert saved["session"]["end_reason"] == "agent_ended"
+
+
+async def test_interrupting_the_goodbye_keeps_the_call_open(harness_factory):
+    h = await harness_factory(
+        fast_settings(mock_stt_script=("Bye!", "Wait, one more thing."), mock_tts_ms_per_char=60.0)
+    )
+    await h.say()
+    await wait_for(lambda: h.session.state.value == "speaking", message="goodbye playing")
+    await h.pipeline.on_message(json.dumps({"type": "interrupt", "turn_id": 1, "played_ms": 300}))
+    assert h.session.hangup_requested is False
+    await h.say()
+    await wait_for(lambda: len(h.transport.of("transcript_final")) == 2, message="next turn")
+    assert not h.pipeline.ended.is_set()

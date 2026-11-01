@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Call History</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app wide">
+      <header class="top">
+        <div>
+          <h1>Call history</h1>
+          <p class="sub">Saved transcripts and per-stage latency for recent calls.</p>
+        </div>
+        <div class="top-right">
+          <a class="nav" href="/">Back to the call</a>
+        </div>
+      </header>
+
+      <div id="banner" class="banner" role="alert" hidden><span id="banner-text"></span></div>
+
+      <section class="latency">
+        <div class="latency-head">
+          <h2>Latency, last 20 spoken turns</h2>
+          <button id="refresh" class="btn ghost small" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data" id="summary">
+            <thead>
+              <tr><th>Stage</th><th>Turns</th><th>Median</th><th>p90</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="stats" id="verdict"></p>
+      </section>
+
+      <section class="panel">
+        <h2>Recent calls</h2>
+        <div class="table-wrap">
+          <table class="data clickable" id="calls">
+            <thead>
+              <tr>
+                <th>Started</th><th>Duration</th><th>Turns</th><th>Median total</th><th>Ended</th>
+                <th>First words</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="stats" id="calls-empty" hidden>No calls yet. Make one from the call page.</p>
+      </section>
+
+      <section class="panel" id="detail" hidden>
+        <div class="latency-head">
+          <h2 id="detail-title">Call</h2>
+          <span class="links">
+            <a id="download-md" href="#" target="_blank" rel="noopener">Transcript (Markdown)</a>
+            <a id="download-json" href="#" target="_blank" rel="noopener">JSON</a>
+          </span>
+        </div>
+        <p class="stats" id="detail-meta"></p>
+        <div class="transcript compact" id="detail-transcript"></div>
+        <div class="table-wrap">
+          <table class="data" id="detail-metrics">
+            <thead>
+              <tr><th>Turn</th><th>VAD</th><th>STT</th><th>LLM</th><th>TTS</th><th>Total</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="history.js" type="module"></script>
+  </body>
+</html>

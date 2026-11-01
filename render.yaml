@@ -1,0 +1,25 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Dashboard -> New -> Blueprint -> pick this repository -> Apply.
+# Leave the API keys empty for demo mode (mock providers), or fill them in to use
+# Deepgram and Claude; providers switch automatically (STT/LLM/TTS_PROVIDER=auto).
+services:
+  - type: web
+    name: voice-agent
+    runtime: docker
+    plan: free
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
+      - key: LLM_MODEL
+        value: claude-opus-5-5
+      - key: MAX_ACTIVE_CALLS
+        value: "5"
+      - key: MAX_CALL_DURATION_S
+        value: "300"

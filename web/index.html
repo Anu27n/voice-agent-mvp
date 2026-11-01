@@ -11,28 +11,53 @@
       <header class="top">
         <div>
           <h1>Voice Agent</h1>
-          <p class="sub">Talk naturally. You can interrupt at any time.</p>
+          <p class="sub">Talk naturally, or type. You can interrupt at any time.</p>
         </div>
-        <div class="status" id="status" data-state="idle" role="status">
-          <span class="dot"></span><span id="status-label">Idle</span>
+        <div class="top-right">
+          <a class="nav" href="history.html">Call history</a>
+          <div class="status" id="status" data-state="idle" role="status">
+            <span class="dot"></span><span id="status-label">Idle</span>
+          </div>
         </div>
       </header>
+
+      <p class="demo" id="demo" hidden>
+        <strong>Demo mode.</strong> No API keys are configured, so speech recognition is scripted (it "hears" a
+        fixed list of questions), replies come from a rule-based stand-in for the LLM, and the voice is a synthetic
+        hum. Typed messages skip the scripted recognition, so type a question to try the real tools.
+      </p>
 
       <section class="controls">
         <button id="start" class="btn primary" type="button">Start Call</button>
         <button id="end" class="btn danger" type="button" disabled>End Call</button>
+        <button id="mute" class="btn ghost" type="button" aria-pressed="false" disabled>Mute</button>
         <div class="meter" title="Microphone level" aria-hidden="true"><div id="level"></div></div>
       </section>
 
-      <div id="banner" class="banner" role="alert" hidden></div>
+      <div id="banner" class="banner" role="alert" hidden>
+        <span id="banner-text"></span>
+        <button id="text-only" class="link" type="button" hidden>Start a text-only call instead</button>
+      </div>
 
       <section class="transcript" id="transcript" aria-live="polite">
-        <p class="empty" id="empty">
-          Press <strong>Start Call</strong> and allow microphone access. Try
-          <em>"What time is it in Tokyo?"</em> or <em>"Where is order A1001?"</em>
-        </p>
+        <div class="empty" id="empty">
+          <p>Press <strong>Start Call</strong> and allow microphone access. Try:</p>
+          <ul>
+            <li>"What time is it in Tokyo?"</li>
+            <li>"Where is order A1001?"</li>
+            <li>"What's the weather in Paris?"</li>
+            <li>"What's 18 percent of 240?"</li>
+            <li>"Thanks, that's all." (the agent hangs up)</li>
+          </ul>
+        </div>
       </section>
       <p class="partial" id="partial" aria-live="polite"></p>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <input id="message" type="text" maxlength="2000" placeholder="Type a message (Enter to send)" disabled />
+        <button id="send" class="btn" type="submit" disabled>Send</button>
+      </form>
+      <p class="hint">Shortcuts: <kbd>Esc</kbd> end call, <kbd>M</kbd> mute/unmute, <kbd>/</kbd> type a message.</p>
 
       <section class="latency">
         <div class="latency-head">

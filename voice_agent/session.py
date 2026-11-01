@@ -20,6 +20,8 @@ class Session:
     id: str
     started_at: str
     created_monotonic: float
+    timezone: str | None = None  # the caller's IANA time zone, if the client sent one
+    hangup_requested: bool = False  # set by the end_call tool; the call ends after the reply plays
     conversation: Conversation = field(default_factory=Conversation)
     machine: StateMachine = field(default_factory=StateMachine)
     connected: bool = False
@@ -40,10 +42,13 @@ class SessionManager:
         self._settings = settings
         self._sessions: dict[str, Session] = {}
 
-    async def create(self) -> Session:
+    async def create(self, timezone: str | None = None) -> Session:
         await self._expire_unclaimed()
-        session = Session(id=uuid.uuid4().hex, started_at=utcnow(), created_monotonic=time.monotonic())
-        await self._store.create_session(session.id, session.started_at, self._settings.public_config())
+        session = Session(
+            id=uuid.uuid4().hex, started_at=utcnow(), created_monotonic=time.monotonic(), timezone=timezone
+        )
+        config = {**self._settings.public_config(), "caller_timezone": timezone}
+        await self._store.create_session(session.id, session.started_at, config)
         self._sessions[session.id] = session
         return session
 

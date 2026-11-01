@@ -36,14 +36,17 @@ def register_tts(name: str) -> Callable[[Factory[TTSProvider]], Factory[TTSProvi
 
 
 def build_stt(settings: Settings) -> STTProvider:
+    settings = settings.resolve_auto()
     return _build("STT", _STT, settings.stt_provider, settings, STTProvider)
 
 
 def build_llm(settings: Settings) -> LLMProvider:
+    settings = settings.resolve_auto()
     return _build("LLM", _LLM, settings.llm_provider, settings, LLMProvider)
 
 
 def build_tts(settings: Settings) -> TTSProvider:
+    settings = settings.resolve_auto()
     return _build("TTS", _TTS, settings.tts_provider, settings, TTSProvider)
 
 
