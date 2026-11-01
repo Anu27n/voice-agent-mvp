@@ -44,7 +44,8 @@ conversation until you or it hangs up.
   <kbd>/</kbd> type), and a mic level meter.
 
 The full design (flow, event schema, interfaces, barge-in, latency definitions)
-is in [docs/DESIGN.md](docs/DESIGN.md).
+is in [docs/DESIGN.md](docs/DESIGN.md). A short note on design choices and what
+isn't done yet is in [SUBMISSION.md](SUBMISSION.md).
 
 ## Architecture
 
